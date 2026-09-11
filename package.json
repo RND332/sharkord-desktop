@@ -47,7 +47,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "sharkord-desktop-${version}-win-${arch}-setup.${ext}"
     },
     "mac": {
       "target": [
@@ -55,6 +56,9 @@
         "zip"
       ],
       "category": "public.app-category.social-networking"
+    },
+    "portable": {
+      "artifactName": "sharkord-desktop-${version}-win-${arch}-portable.${ext}"
     }
   },
   "devDependencies": {
