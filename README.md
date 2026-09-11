@@ -57,13 +57,29 @@ bun run build && electron . --cleanup   # remove leftovers after a crash
 
 ## Verification
 
-`bun run selftest` measures three signals while a 997 Hz tone plays *inside the app* and a 1493 Hz tone
-plays from an unrelated process into the capture sink:
+`bun run selftest` plays a 997 Hz tone *inside the app window* and a 1493 Hz tone from an unrelated
+process into the capture sink, then measures three signals (last run, 2026-09-12):
 
-- capture PCM: pc tone present, app tone absent;
-- hardware monitor: app tone present (proves the tone really played);
-- injected track (read back through `MediaStreamTrackProcessor` in the renderer): pc tone present, app
-  tone absent.
+| signal | pc tone (must be captured) | app tone (must not leak) |
+|---|---|---|
+| capture sink monitor | `0.350` | `0.001` |
+| injected track read back in the renderer | `0.350` | `0.001` |
+| hardware monitor (control) | — | `0.350` |
+
+The third row proves the tone really played; the middle row proves the track handed to the client
+carries it. Both tone levels are exactly the amplitude that was played (0.35).
+
+`bun run test` covers the pactl parsers against captured fixtures, the routing manager against a fake
+`pactl` (setup order, idempotent restart, stale cleanup, loopback repair, device loss, own-stream
+protection), the `parec` supervisor's restart policy, the PCM framing (byte-exact carry, per-channel
+RMS, Goertzel selectivity) and the patch behaviour (passthrough, merge, fallback, backpressure,
+release).
+
+Electron on Linux has no default screen picker — `getDisplayMedia` rejects with `NotSupportedError`
+unless the app installs `setDisplayMediaRequestHandler`. This app installs one that calls
+`desktopCapturer.getSources()`, which is what raises the desktop's own dialog (Hyprland's
+`hyprland-preview-share-picker`) and returns the source the user selected there. Electron's own
+`useSystemPicker` option is macOS-only and is not used.
 
 ## Known limits
 

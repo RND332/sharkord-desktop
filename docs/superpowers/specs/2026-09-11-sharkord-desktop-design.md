@@ -75,7 +75,7 @@ fork and no server change.
 | `src/main/pipewire.ts` | stateless `pactl` wrapper: typed invocations + parsers (`list sinks`, `list sink-inputs`, `list modules`, `get-default-sink`, `subscribe`) |
 | `src/main/routing.ts` | `RoutingManager`: setup (null sink → loopback → default sink → move foreign streams), health watch, teardown, stale-state recovery |
 | `src/main/capture.ts` | `Capture`: `parec` supervisor, chunk fan-out, restart policy |
-| `src/main/index.ts` | lifecycle, window, permissions, display-media handler, wiring, exit teardown, `--selftest` / `--cleanup` |
+| `src/main/index.ts` | lifecycle, window, permissions, display-media handler (Electron rejects `getDisplayMedia` without one; the handler forwards the desktop portal's own picker), wiring, exit teardown, `--selftest` / `--cleanup` |
 | `src/main/config.ts` | URL, sink name, hw sink override, debug PCM path, CLI parsing |
 | `src/shared/pcm.ts` | interleaved f32 → `AudioData` framing math, Goertzel band measurement, WAV writer (used by the main-world patch and the selftest) |
 | `src/preload/index.ts` | `contextBridge` API (`createSystemAudioTrack`, `release`), injects the patch into the main world |

@@ -1,9 +1,12 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   getDefaultSink,
   listModules,
+  parseModules,
+  parseSinks,
   listSinkInputs,
   listSinks,
   loadModule,
@@ -129,10 +132,12 @@ export class RoutingManager {
   }
 
   async start(): Promise<RoutingState> {
+    // A previous run knows which device the user listens on; the metadata is ours while we run.
+    const deviceHint = this.readStoredState()?.hwSink ?? null;
     await this.cleanupStale();
 
     const sinks = await listSinks(this.runner);
-    const hwSink = await this.resolveHardwareSink(sinks);
+    const hwSink = await this.resolveHardwareSink(sinks, deviceHint);
     if (!hwSink) throw new Error('no playback device available for local monitoring');
 
     const nullModuleId = await loadModule(this.runner, 'module-null-sink', [
@@ -205,6 +210,90 @@ export class RoutingManager {
     };
   }
 
+  /**
+   * Blocking teardown for exit paths: a SIGTERM gives us milliseconds, so nothing here
+   * may yield to the event loop.
+   */
+  stopSync(): void {
+    const { active, hwSink, nullModuleId, loopbackModuleId } = this.current;
+    if (!active) {
+      this.cleanupStaleSync();
+      return;
+    }
+
+    const target = this.resolveHardwareSinkSync(hwSink);
+    if (target) {
+      try {
+        execFileSync('pactl', ['set-default-sink', target], { stdio: 'ignore' });
+      } catch (error) {
+        this.log('could not restore the default sink:', error);
+      }
+    }
+
+    for (const id of [loopbackModuleId, nullModuleId]) {
+      if (!id) continue;
+      try {
+        execFileSync('pactl', ['unload-module', String(id)], { stdio: 'ignore' });
+      } catch (error) {
+        this.log('could not unload module', id, error);
+      }
+    }
+
+    try {
+      unlinkSync(this.statePath);
+    } catch {
+      // already gone
+    }
+
+    this.current = {
+      active: false,
+      sinkName: this.sinkName,
+      hwSink: null,
+      nullModuleId: null,
+      loopbackModuleId: null
+    };
+  }
+
+  private cleanupStaleSync(): void {
+    const stored = this.readStoredState();
+    const ids = new Set<number>();
+    if (stored?.nullModuleId) ids.add(stored.nullModuleId);
+    if (stored?.loopbackModuleId) ids.add(stored.loopbackModuleId);
+
+    try {
+      for (const module of parseModules(execFileSync('pactl', ['list', 'modules'], { encoding: 'utf8' }))) {
+        if (this.isOurs(module)) ids.add(module.id);
+      }
+    } catch (error) {
+      this.log('could not list modules:', error);
+    }
+
+    for (const id of ids) {
+      try {
+        execFileSync('pactl', ['unload-module', String(id)], { stdio: 'ignore' });
+      } catch {
+        // module already gone
+      }
+    }
+
+    try {
+      unlinkSync(this.statePath);
+    } catch {
+      // nothing to clean
+    }
+  }
+
+  private resolveHardwareSinkSync(preferred: string | null): string | null {
+    let sinks: Sink[] = [];
+    try {
+      sinks = parseSinks(execFileSync('pactl', ['list', 'sinks'], { encoding: 'utf8' }));
+    } catch {
+      return preferred;
+    }
+    if (preferred && sinks.some((sink) => sink.name === preferred && !sink.isMonitor)) return preferred;
+    return pickHardwareSink(sinks, [this.sinkName]);
+  }
+
   /** Repairs whatever a device change or a PipeWire restart broke. */
   async ensureHealthy(): Promise<void> {
     if (!this.current.active) return;
@@ -259,11 +348,12 @@ export class RoutingManager {
     return false;
   }
 
-  private async resolveHardwareSink(sinks: Sink[]): Promise<string | null> {
-    if (this.hwSinkOverride) return this.hwSinkOverride;
-
+  private async resolveHardwareSink(sinks: Sink[], hint: string | null): Promise<string | null> {
     const candidates = sinks.filter((sink) => !sink.isMonitor && sink.name !== this.sinkName);
     if (candidates.length === 0) return null;
+
+    const preferred = this.hwSinkOverride ?? hint;
+    if (preferred && candidates.some((sink) => sink.name === preferred)) return preferred;
 
     const current = await getDefaultSink(this.runner).catch(() => '');
     if (candidates.some((sink) => sink.name === current)) return current;

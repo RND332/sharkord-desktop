@@ -1,17 +1,12 @@
-import { app, BrowserWindow, ipcMain, session } from 'electron';
+import { app, BrowserWindow, desktopCapturer, ipcMain, session } from 'electron';
+import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from './config';
 import { Capture } from './capture';
 import { RoutingManager } from './routing';
-import {
-  getDefaultSink,
-  listSinks,
-  pickHardwareSink,
-  realRunner,
-  subscribe
-} from './pipewire';
+import { subscribe } from './pipewire';
 import { runSelftest } from './selftest';
 import { writeWav } from './wav';
 
@@ -27,24 +22,6 @@ let mainWindow: BrowserWindow | null = null;
 let hardwareSink: string | null = null;
 let shuttingDown = false;
 const debugChunks: Buffer[] = [];
-
-/** The real output device: everything the user hears except our own capture. */
-const resolveHardwareSink = async (): Promise<string> => {
-  if (config.hwSink) return config.hwSink;
-
-  const [sinks, current] = await Promise.all([
-    listSinks(realRunner),
-    getDefaultSink(realRunner)
-  ]);
-
-  if (current && current !== config.sinkName && sinks.some((sink) => sink.name === current)) {
-    return current;
-  }
-
-  const picked = pickHardwareSink(sinks, [config.sinkName]);
-  if (!picked) throw new Error('no output device available to play captures back to');
-  return picked;
-};
 
 const installPermissionHandlers = (): void => {
   const origin = new URL(config.url).origin;
@@ -63,6 +40,29 @@ const installPermissionHandlers = (): void => {
 
   session.defaultSession.setPermissionCheckHandler((_contents, permission, requestingOrigin) => {
     return requestingOrigin.startsWith(origin) && allowed[permission] === true;
+  });
+
+  // Electron has no default screen picker on Linux (getDisplayMedia rejects with NotSupportedError).
+  // On Wayland this call opens the desktop's own picker — Hyprland's share dialog — and the first
+  // source it returns is what the user selected there.
+  session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
+    try {
+      const sources = await desktopCapturer.getSources({
+        types: ['screen', 'window'],
+        thumbnailSize: { width: 0, height: 0 }
+      });
+      const picked = sources[0];
+      if (!picked) {
+        log('screen share cancelled: no source selected');
+        callback({});
+        return;
+      }
+      log('screen share source:', JSON.stringify({ name: picked.name, of: sources.length }));
+      callback({ video: picked });
+    } catch (error) {
+      log('screen share failed:', error);
+      callback({});
+    }
   });
 };
 
@@ -113,7 +113,7 @@ const shutdown = async (code: number): Promise<void> => {
     }
   }
   try {
-    await routing?.stop();
+    routing?.stopSync();
   } catch (error) {
     log('routing teardown failed:', error);
   }
@@ -135,22 +135,24 @@ const bootstrap = async (): Promise<void> => {
     return;
   }
 
-  hardwareSink = await resolveHardwareSink();
-  // Our own playback never goes through the capture sink, so the voice channel is never re-broadcast.
-  process.env.PULSE_SINK = hardwareSink;
-
   routing = new RoutingManager({
     statePath: config.statePath,
     sinkName: config.sinkName,
-    hwSinkOverride: hardwareSink,
+    hwSinkOverride: config.hwSink,
     log
   });
-  await routing.start();
-  log('routing up:', JSON.stringify(routing.state));
+  const routingState = await routing.start();
+  hardwareSink = routingState.hwSink;
+  // Our own playback never goes through the capture sink, so the voice channel is never re-broadcast.
+  if (hardwareSink) process.env.PULSE_SINK = hardwareSink;
+  log('routing up:', JSON.stringify(routingState));
 
   installPermissionHandlers();
   registerIpc();
   subscribe(scheduleHealthCheck);
+
+  const preloadPath = join(__dirname, 'preload.js');
+  if (!existsSync(preloadPath)) log('WARNING: preload bundle missing at', preloadPath);
 
   const window = new BrowserWindow({
     width: 1280,
@@ -160,7 +162,7 @@ const bootstrap = async (): Promise<void> => {
     show: !config.selftest,
     backgroundColor: '#0b0d12',
     webPreferences: {
-      preload: join(__dirname, 'preload.js'),
+      preload: preloadPath,
       contextIsolation: true,
       sandbox: true,
       nodeIntegration: false,
@@ -168,9 +170,14 @@ const bootstrap = async (): Promise<void> => {
       backgroundThrottling: false
     }
   });
+
+  window.webContents.on('preload-error', (_event, path, error) => {
+    log('preload failed:', path, error);
+  });
   mainWindow = window;
 
   if (config.selftest) {
+    if (!hardwareSink) throw new Error('selftest needs a playback device');
     const pagePath = join(tmpdir(), 'sharkord-desktop-selftest.html');
     await writeFile(pagePath, '<!doctype html><meta charset="utf-8"><title>selftest</title><body>selftest</body>');
     await window.loadFile(pagePath);
@@ -188,6 +195,26 @@ const bootstrap = async (): Promise<void> => {
 
   await window.loadURL(config.url);
   log('client loaded:', config.url);
+
+  // The patch is injected asynchronously from the preload; give it a moment before judging.
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const readiness = (await window.webContents.executeJavaScript(
+      `({
+        bridge: typeof window.sharkordDesktop,
+        patched: !String(navigator.mediaDevices?.getDisplayMedia ?? '').includes('native code'),
+        generator: typeof MediaStreamTrackGenerator === 'function'
+      })`,
+      true
+    )) as { bridge: string; patched: boolean; generator: boolean };
+    if (readiness.bridge === 'object' && readiness.patched) {
+      log('screen-share audio ready:', JSON.stringify(readiness));
+      break;
+    }
+    if (attempt === 9) {
+      log('WARNING: screen-share audio patch is not installed:', JSON.stringify(readiness));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
 
   window.on('closed', () => {
     void shutdown(0);

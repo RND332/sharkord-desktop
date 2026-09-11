@@ -23,6 +23,7 @@ const bridge = {
 };
 
 contextBridge.exposeInMainWorld('sharkordDesktop', bridge);
+console.log('[sharkord-desktop] preload ready, bridge exposed');
 
 void (async () => {
   try {
