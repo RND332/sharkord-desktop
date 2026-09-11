@@ -5,6 +5,7 @@ export type ChildProcessLike = {
   stdout: { on(event: 'data', cb: (chunk: Buffer) => void): void } | null;
   stderr: { on(event: 'data', cb: (chunk: Buffer) => void): void } | null;
   on(event: 'exit', cb: (code: number | null) => void): void;
+  on(event: 'error', cb: (error: Error) => void): void;
   kill(): void;
 };
 
@@ -286,6 +287,30 @@ export class TapCapture {
     this.emitState();
   }
 
+  private scheduleRestart(code: number | null): void {
+    if (this.stopping) {
+      this.emitState();
+      return;
+    }
+
+    const backoff = this.options.backoffMs ?? [250, 500, 1000, 2000, 4000];
+    const maxRestarts = this.options.maxRestarts ?? 5;
+    if (this.restarts >= maxRestarts) {
+      this.log(`pw-record exited (${code}) and gave up after ${this.restarts} restarts`);
+      this.emitState();
+      return;
+    }
+
+    const delay = backoff[Math.min(this.restarts, backoff.length - 1)] ?? 4000;
+    this.restarts += 1;
+    this.log(`pw-record exited (${code}), restart ${this.restarts} in ${delay}ms`);
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (!this.stopping) this.spawnChild();
+    }, delay);
+    this.emitState();
+  }
+
   private emitState(): void {
     const state: TapState = { running: this.running, linked: this.linked.size, restarts: this.restarts };
     for (const callback of this.stateCallbacks) callback(state);
@@ -316,29 +341,32 @@ export class TapCapture {
       for (const callback of this.dataCallbacks) callback(chunk);
     });
     child.stderr?.on('data', (chunk) => this.log('pw-record:', chunk.toString().trim()));
-    child.on('exit', (code) => {
+
+    // 'error' and 'exit' can both arrive for one child; the first one wins.
+    let settled = false;
+    const settle = (): boolean => {
+      if (settled) return false;
+      settled = true;
       if (this.child === child) this.child = null;
-      if (this.stopping) {
+      return true;
+    };
+
+    child.on('error', (error: Error) => {
+      if (!settle()) return;
+      const code = (error as NodeJS.ErrnoException).code;
+      this.log(`cannot record: ${error.message}`);
+      if (code === 'ENOENT') {
+        // No PipeWire tools on this machine — retrying will not help.
+        this.stopping = true;
         this.emitState();
         return;
       }
+      this.scheduleRestart(null);
+    });
 
-      const backoff = this.options.backoffMs ?? [250, 500, 1000, 2000, 4000];
-      const maxRestarts = this.options.maxRestarts ?? 5;
-      if (this.restarts >= maxRestarts) {
-        this.log(`pw-record exited (${code}) and gave up after ${this.restarts} restarts`);
-        this.emitState();
-        return;
-      }
-
-      const delay = backoff[Math.min(this.restarts, backoff.length - 1)] ?? 4000;
-      this.restarts += 1;
-      this.log(`pw-record exited (${code}), restart ${this.restarts} in ${delay}ms`);
-      this.timer = setTimeout(() => {
-        this.timer = null;
-        if (!this.stopping) this.spawnChild();
-      }, delay);
-      this.emitState();
+    child.on('exit', (code) => {
+      if (!settle()) return;
+      this.scheduleRestart(code);
     });
 
     const pollMs = this.options.pollMs ?? 1000;

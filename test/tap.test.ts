@@ -70,9 +70,17 @@ const makeWorld = (ownPids: number[] = [], dump: string = PW_DUMP) => {
     }
     throw new Error(`unexpected ${bin} ${args.join(' ')}`);
   };
+  const errors: Array<(error: Error) => void> = [];
   const spawner: Spawner = (_bin, args) => {
     spawns.push(args);
-    return { stdout: null, stderr: null, on: () => {}, kill: () => {} } satisfies ChildProcessLike;
+    return {
+      stdout: null,
+      stderr: null,
+      on: (event: string, cb: (arg: never) => void) => {
+        if (event === 'error') errors.push(cb as unknown as (error: Error) => void);
+      },
+      kill: () => {}
+    } satisfies ChildProcessLike;
   };
   const tap = new TapCapture({
     spawner,
@@ -81,7 +89,7 @@ const makeWorld = (ownPids: number[] = [], dump: string = PW_DUMP) => {
     ownsProcess: (pid) => pid !== null && ownPids.includes(pid),
     log: () => {}
   });
-  return { links, spawns, tap };
+  return { links, spawns, tap, emitSpawnError: (error: Error) => errors.forEach((cb) => cb(error)) };
 };
 
 describe('parseGraph', () => {
@@ -221,6 +229,28 @@ describe('TapCapture', () => {
 
     expect(tap.linkedCount).toBe(4);
     expect(logs.some((line) => line.includes('could not tap'))).toBe(false);
+    tap.stop();
+  });
+
+  it('reports a machine without pw-record instead of crashing, and does not retry', () => {
+    const { tap, spawns, emitSpawnError } = makeWorld();
+    tap.start();
+
+    emitSpawnError(Object.assign(new Error('spawn pw-record ENOENT'), { code: 'ENOENT' }));
+    vi.advanceTimersByTime(60_000);
+
+    expect(tap.running).toBe(false);
+    expect(spawns).toHaveLength(1);
+    tap.stop();
+  });
+
+  it('retries when the recorder dies for another reason', () => {
+    const { tap, spawns, emitSpawnError } = makeWorld();
+    tap.start();
+    emitSpawnError(Object.assign(new Error('resource temporarily unavailable'), { code: 'EAGAIN' }));
+    vi.advanceTimersByTime(300);
+
+    expect(spawns).toHaveLength(2);
     tap.stop();
   });
 
