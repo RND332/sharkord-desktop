@@ -25,11 +25,19 @@ const bridge = {
 contextBridge.exposeInMainWorld('sharkordDesktop', bridge);
 console.log('[sharkord-desktop] preload ready, bridge exposed');
 
-void (async () => {
-  try {
-    const source = (await ipcRenderer.invoke('patch:source')) as string;
-    await webFrame.executeJavaScript(source);
-  } catch (error) {
-    console.error('[sharkord-desktop] failed to inject the display-media patch', error);
-  }
-})();
+// Only Linux needs the injection: there the capture is ours. Elsewhere the platform already
+// provides system audio and wrapping getDisplayMedia would throw it away.
+if (process.platform === 'linux') {
+  void (async () => {
+    try {
+      const source = (await ipcRenderer.invoke('patch:source')) as string;
+      await webFrame.executeJavaScript(source);
+    } catch (error) {
+      console.error('[sharkord-desktop] failed to inject the display-media patch', error);
+    }
+  })();
+} else {
+  console.info(
+    `[sharkord-desktop] ${process.platform}: using the platform's own display capture (no PipeWire routing)`
+  );
+}

@@ -100,8 +100,18 @@ export class RoutingManager {
     return { ...this.current };
   }
 
-  /** Removes anything a previous (possibly crashed) run left behind. */
-  async cleanupStale(): Promise<void> {
+  /**
+   * Removes anything a previous (possibly crashed) run left behind.
+   * Refuses while a live instance owns the routing unless forced: `--cleanup` must never
+   * tear the sink out from under a running app.
+   */
+  async cleanupStale(force = false): Promise<void> {
+    const owner = this.liveInstancePid();
+    if (!force && owner !== null) {
+      this.log(`another instance (pid ${owner}) is routing audio; leaving it alone`);
+      return;
+    }
+
     const stored = this.readStoredState();
     const ids = new Set<number>();
     if (stored?.nullModuleId) ids.add(stored.nullModuleId);
@@ -134,7 +144,9 @@ export class RoutingManager {
   async start(): Promise<RoutingState> {
     // A previous run knows which device the user listens on; the metadata is ours while we run.
     const deviceHint = this.readStoredState()?.hwSink ?? null;
-    await this.cleanupStale();
+    // Forced: the single-instance lock already guarantees we are the only app, so anything
+    // left here is debris from a crashed run.
+    await this.cleanupStale(true);
 
     const sinks = await listSinks(this.runner);
     const hwSink = await this.resolveHardwareSink(sinks, deviceHint);
@@ -164,6 +176,7 @@ export class RoutingManager {
       loopbackModuleId
     };
     this.persist();
+    this.writeOwnerPid();
     return this.state;
   }
 
@@ -200,6 +213,7 @@ export class RoutingManager {
     } catch {
       // already gone
     }
+    this.clearOwnership();
 
     this.current = {
       active: false,
@@ -244,6 +258,7 @@ export class RoutingManager {
     } catch {
       // already gone
     }
+    this.clearOwnership();
 
     this.current = {
       active: false,
@@ -255,6 +270,12 @@ export class RoutingManager {
   }
 
   private cleanupStaleSync(): void {
+    const owner = this.liveInstancePid();
+    if (owner !== null) {
+      this.log(`another instance (pid ${owner}) is routing audio; leaving it alone`);
+      return;
+    }
+
     const stored = this.readStoredState();
     const ids = new Set<number>();
     if (stored?.nullModuleId) ids.add(stored.nullModuleId);
@@ -376,6 +397,43 @@ export class RoutingManager {
       } catch (error) {
         this.log('could not move stream', input.id, error);
       }
+    }
+  }
+
+  private get ownerPath(): string {
+    return `${this.statePath}.pid`;
+  }
+
+  private writeOwnerPid(): void {
+    try {
+      writeFileSync(this.ownerPath, String(process.pid));
+    } catch (error) {
+      this.log('could not record ownership:', error);
+    }
+  }
+
+  private clearOwnership(): void {
+    try {
+      unlinkSync(this.ownerPath);
+    } catch {
+      // never written
+    }
+  }
+
+  /** The pid of a live instance that currently owns the sink, if any. */
+  private liveInstancePid(): number | null {
+    let pid: number;
+    try {
+      pid = Number(readFileSync(this.ownerPath, 'utf8').trim());
+    } catch {
+      return null;
+    }
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return null;
+    try {
+      process.kill(pid, 0);
+      return pid;
+    } catch {
+      return null;
     }
   }
 

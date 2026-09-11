@@ -2,21 +2,76 @@
   "name": "sharkord-desktop",
   "version": "0.1.0",
   "private": true,
-  "description": "Sharkord desktop client: screen sharing with full PC audio, excluding Sharkord's own playback",
+  "description": "Sharkord desktop client whose screen share carries the whole PC's audio except Sharkord itself",
+  "author": "Talgat Minigaliev <https://github.com/RND332>",
+  "license": "MIT",
   "main": "dist/main.js",
   "scripts": {
     "build": "node build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "icon": "node scripts/make-icon.mjs",
     "start": "bun run build && electron .",
-    "selftest": "bun run build && electron . --selftest"
+    "selftest": "bun run build && electron . --selftest",
+    "dist": "bun run build && electron-builder --publish never",
+    "dist:linux": "bun run build && electron-builder --linux --x64 --arm64 --publish never",
+    "dist:win": "bun run build && electron-builder --win --x64 --publish never",
+    "dist:mac": "bun run build && electron-builder --mac --x64 --arm64 --publish never"
+  },
+  "build": {
+    "appId": "com.rnd332.sharkord-desktop",
+    "productName": "Sharkord Desktop",
+    "artifactName": "sharkord-desktop-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json",
+      "!**/*.map"
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Network",
+      "synopsis": "Sharkord client with full-PC screen-share audio (PipeWire)"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.social-networking"
+    }
   },
   "devDependencies": {
     "@types/node": "^22.20.2",
     "electron": "^44.3.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0"
   },
-  "trustedDependencies": ["electron"]
+  "trustedDependencies": [
+    "electron"
+  ],
+  "homepage": "https://github.com/RND332/sharkord-desktop",
+  "desktopName": "sharkord-desktop",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RND332/sharkord-desktop.git"
+  }
 }

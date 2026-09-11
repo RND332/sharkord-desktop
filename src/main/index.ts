@@ -129,27 +129,25 @@ const bootstrap = async (): Promise<void> => {
   });
 
   if (config.cleanup) {
-    await routing.cleanupStale();
+    if (config.mode === 'capture') await routing.cleanupStale();
     log('cleanup done');
     app.exit(0);
     return;
   }
 
-  routing = new RoutingManager({
-    statePath: config.statePath,
-    sinkName: config.sinkName,
-    hwSinkOverride: config.hwSink,
-    log
-  });
-  const routingState = await routing.start();
-  hardwareSink = routingState.hwSink;
-  // Our own playback never goes through the capture sink, so the voice channel is never re-broadcast.
-  if (hardwareSink) process.env.PULSE_SINK = hardwareSink;
-  log('routing up:', JSON.stringify(routingState));
+  if (config.mode === 'capture') {
+    const routingState = await routing.start();
+    hardwareSink = routingState.hwSink;
+    // Our own playback never goes through the capture sink, so the voice channel is never re-broadcast.
+    if (hardwareSink) process.env.PULSE_SINK = hardwareSink;
+    log('routing up:', JSON.stringify(routingState));
+  } else {
+    log(`${process.platform}: no PipeWire routing — screen-share audio follows the platform`);
+  }
 
   installPermissionHandlers();
   registerIpc();
-  subscribe(scheduleHealthCheck);
+  if (config.mode === 'capture') subscribe(scheduleHealthCheck);
 
   const preloadPath = join(__dirname, 'preload.js');
   if (!existsSync(preloadPath)) log('WARNING: preload bundle missing at', preloadPath);
@@ -195,6 +193,10 @@ const bootstrap = async (): Promise<void> => {
 
   await window.loadURL(config.url);
   log('client loaded:', config.url);
+
+  if (config.mode !== 'capture') {
+    return;
+  }
 
   // The patch is injected asynchronously from the preload; give it a moment before judging.
   for (let attempt = 0; attempt < 10; attempt += 1) {

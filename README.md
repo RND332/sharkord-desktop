@@ -1,15 +1,37 @@
 # Sharkord Desktop
 
-Electron client for a self-hosted [Sharkord](https://github.com/Sharkord/sharkord) instance that makes
+[![build](https://github.com/RND332/sharkord-desktop/actions/workflows/build.yml/badge.svg)](https://github.com/RND332/sharkord-desktop/actions/workflows/build.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Electron client for a self-hosted [Sharkord](https://github.com/Sharkord/sharkord) instance whose
 screen shares carry **the whole PC's audio except Sharkord itself** — viewers hear your games, browser
 and music, never their own voices.
 
-Tested on Arch/Hyprland/Wayland with PipeWire 1.6 and Electron 44; the server side is stock upstream
-Sharkord (v0.0.25 at the time of writing), no patches, no fork.
+> [!NOTE]
+> Entirely vibecoded: this codebase was written end-to-end by an AI coding agent (opencode-go /
+> deepseek-v4.1-flash) from a one-paragraph request, including the design spec, the implementation
+> plan, the tests, and the CI. No human wrote or reviewed the code before it shipped.
+
+## Platform support
+
+| Platform | Status |
+|---|---|
+| **Linux + PipeWire** | Full feature — this is what the project is about, verified on Arch/Hyprland/Wayland with Electron 44 |
+| Windows | Client wrapper only: no routing, `getDisplayMedia` is left to Chromium, so screen audio follows the platform (and includes whatever you hear, unless Sharkord's own `restrictOwnAudio` setting handles it). Untested here. |
+| macOS | Same as Windows: wrapper only, untested. Screen audio needs the platform's own permission/support. |
+
+Builds for all three platforms are produced by CI; only the Linux build can do the audio exclusion.
+
+## Install
+
+Download from [Releases](https://github.com/RND332/sharkord-desktop/releases): AppImage/deb,
+Windows installer/portable, macOS dmg/zip. macOS and Windows builds are unsigned, so expect a
+Gatekeeper/SmartScreen warning. The app points at `https://sharkord.example.com` by default — set
+`SHARKORD_URL` (or pass `--url=`) to use your own server.
 
 ## How it works
 
-The client's playback is the noise everyone else hears back. So it is kept out of the captured signal
+The client's playback is the noise everyone else hears back, so it is kept out of the captured signal
 by construction:
 
 ```text
@@ -40,11 +62,12 @@ bun install
 bun run start          # build + launch
 bun run test           # unit tests
 bun run selftest       # proves the app's own audio is excluded from the capture
+bun run dist:linux     # packaged builds (dist:win, dist:mac on those hosts)
 bun run build && electron . --cleanup   # remove leftovers after a crash
 ```
 
 `bin/sharkord-desktop` is a launcher for a desktop entry; `sharkord-desktop.desktop` can be copied to
-`~/.local/share/applications/`.
+`~/.local/share/applications/` (edit the `Exec` path).
 
 ### Configuration
 
@@ -72,8 +95,8 @@ carries it. Both tone levels are exactly the amplitude that was played (0.35).
 `bun run test` covers the pactl parsers against captured fixtures, the routing manager against a fake
 `pactl` (setup order, idempotent restart, stale cleanup, loopback repair, device loss, own-stream
 protection), the `parec` supervisor's restart policy, the PCM framing (byte-exact carry, per-channel
-RMS, Goertzel selectivity) and the patch behaviour (passthrough, merge, fallback, backpressure,
-release).
+RMS, Goertzel selectivity), patch behaviour (passthrough, merge, fallback, backpressure, release) and
+the platform/mode configuration.
 
 Electron on Linux has no default screen picker — `getDisplayMedia` rejects with `NotSupportedError`
 unless the app installs `setDisplayMediaRequestHandler`. This app installs one that calls
@@ -83,7 +106,8 @@ unless the app installs `setDisplayMediaRequestHandler`. This app installs one t
 
 ## Known limits
 
-- Linux/PipeWire only; the whole point is routing that Windows/macOS do differently.
+- The audio exclusion is Linux/PipeWire only; the whole point is routing that Windows/macOS do
+  differently.
 - Applications that bypass the PipeWire graph (raw ALSA exclusive mode) are not captured.
 - Any *other* Sharkord client on the machine (a browser tab) plays through the virtual sink and would
   therefore be part of the stream — use this app as your client while streaming.

@@ -1,9 +1,20 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+export type CaptureMode = 'capture' | 'passthrough';
+
+/**
+ * Capturing "everything except this app" is a PipeWire arrangement; on Windows and macOS the
+ * client keeps whatever audio the platform and the browser hand it.
+ */
+export const resolveMode = (platform: NodeJS.Platform): CaptureMode =>
+  platform === 'linux' ? 'capture' : 'passthrough';
+
 export type Config = {
   /** Web client to load. */
   url: string;
+  /** Whether this build captures audio itself (Linux/PipeWire) or leaves it to the platform. */
+  mode: CaptureMode;
   /** Name of the null sink every non-Sharkord stream is routed into. */
   sinkName: string;
   /** Force a specific output device; by default whatever is default when the app starts. */
@@ -27,13 +38,16 @@ const argValue = (argv: string[], name: string): string | null => {
 
 export const loadConfig = (
   argv: string[] = process.argv.slice(1),
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
 ): Config => ({
   url: argValue(argv, 'url') ?? env.SHARKORD_URL ?? 'https://sharkord.example.com',
+  mode: resolveMode(platform),
   sinkName: env.SHARKORD_SINK_NAME ?? 'sharkord_capture',
   hwSink: env.SHARKORD_HW_SINK ?? null,
   debugPcm: env.SHARKORD_DEBUG_PCM ?? null,
-  statePath: join(env.XDG_RUNTIME_DIR ?? homedir(), 'sharkord-desktop.json'),
+  statePath:
+    env.SHARKORD_STATE_PATH ?? join(env.XDG_RUNTIME_DIR ?? homedir(), 'sharkord-desktop.json'),
   selftest: argv.includes('--selftest'),
   cleanup: argv.includes('--cleanup')
 });

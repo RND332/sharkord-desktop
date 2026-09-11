@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -234,6 +234,46 @@ describe('RoutingManager', () => {
     const loopback = world.modules.find((module) => module.name === 'module-loopback');
     expect(loopback?.args).toContain('sink=alsa_output.pci-hdmi');
     expect(manager.state.hwSink).toBe('alsa_output.pci-hdmi');
+  });
+
+  it('refuses to clean up while another instance owns the routing', async () => {
+    const world = makeWorld({
+      modules: [
+        { id: 77, name: 'module-null-sink', args: [`sink_name=${SINK_NAME}`] }
+      ]
+    });
+    const path = statePath();
+    writeFileSync(`${path}.pid`, String(process.ppid));
+    const manager = makeManager(world, path);
+
+    await manager.cleanupStale();
+
+    expect(world.modules.map((module) => module.id)).toEqual([77]);
+  });
+
+  it('cleans up after an instance that died without tearing down', async () => {
+    const world = makeWorld({
+      modules: [{ id: 77, name: 'module-null-sink', args: [`sink_name=${SINK_NAME}`] }]
+    });
+    const path = statePath();
+    writeFileSync(`${path}.pid`, '999999');
+    const manager = makeManager(world, path);
+
+    await manager.cleanupStale();
+
+    expect(world.modules).toEqual([]);
+  });
+
+  it('records ownership while routing so --cleanup can tell', async () => {
+    const world = makeWorld();
+    const path = statePath();
+    const manager = makeManager(world, path);
+
+    await manager.start();
+    expect(readFileSync(`${path}.pid`, 'utf8').trim()).toBe(String(process.pid));
+
+    await manager.stop();
+    expect(existsSync(`${path}.pid`)).toBe(false);
   });
 
   it('survives a double stop', async () => {
