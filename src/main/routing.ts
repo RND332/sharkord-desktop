@@ -139,14 +139,17 @@ export class RoutingManager {
       `sink_name=${this.sinkName}`,
       'sink_properties=device.description=Sharkord stream capture'
     ]);
+
+    // The default sink has to be ours before the loopback exists, otherwise the move step
+    // below would drag the loopback's own playback stream into the capture sink — a feedback loop.
+    await setDefaultSink(this.runner, this.sinkName);
+    await this.moveForeignStreams();
+
     const loopbackModuleId = await loadModule(this.runner, 'module-loopback', [
       `source=${this.sinkName}.monitor`,
       `sink=${hwSink}`,
       'latency_msec=10'
     ]);
-
-    await setDefaultSink(this.runner, this.sinkName);
-    await this.moveForeignStreams();
 
     this.current = {
       active: true,
@@ -276,6 +279,8 @@ export class RoutingManager {
     for (const input of await listSinkInputs(this.runner)) {
       if (input.sinkIndex === target.index) continue;
       if (this.ownsProcess(input.processId)) continue;
+      // Never move our own monitoring loopback (or anything else attached to this sink already).
+      if (input.appName.includes('loopback') || input.binary === 'pipewire') continue;
       try {
         await moveSinkInput(this.runner, input.id, this.sinkName);
       } catch (error) {

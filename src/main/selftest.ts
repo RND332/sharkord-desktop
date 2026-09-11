@@ -107,17 +107,24 @@ const pageSetup = (measureMs: number): string => `
   };
   window.__selftestPromise = (async () => {
     const bridge = window.sharkordDesktop;
+    const stats = { pcmCallbacks: 0, writes: 0, writeError: null, maxInputPc: 0, maxInputApp: 0, framesRead: 0, maxFrameAbs: 0 };
     await bridge.acquireCapture();
     const generator = new MediaStreamTrackGenerator({ kind: 'audio' });
     const writer = generator.writable.getWriter();
     let stamp = 0;
     let pending = 0;
     bridge.onPcm((chunk) => {
+      stats.pcmCallbacks++;
       const frames = Math.floor(chunk.byteLength / (4 * CH));
       if (!frames) return;
       const data = new Float32Array(chunk.buffer, chunk.byteOffset, frames * CH).slice();
+      const left = new Float32Array(frames);
+      for (let i = 0, j = 0; i < data.length; i += CH, j++) left[j] = data[i];
+      stats.maxInputPc = Math.max(stats.maxInputPc, amp(left, PC));
+      stats.maxInputApp = Math.max(stats.maxInputApp, amp(left, APP));
       if (pending < 12) {
         pending++;
+        stats.writes++;
         writer.write(new AudioData({
           format: 'f32',
           sampleRate: SR,
@@ -125,7 +132,7 @@ const pageSetup = (measureMs: number): string => `
           numberOfChannels: CH,
           timestamp: stamp,
           data
-        })).catch(() => {}).finally(() => pending--);
+        })).then(() => {}).catch((error) => { stats.writeError = String(error); }).finally(() => pending--);
       }
       stamp += Math.round(frames / SR * 1e6);
     });
@@ -139,17 +146,23 @@ const pageSetup = (measureMs: number): string => `
       const { value: frame, done } = await reader.read();
       if (done) break;
       const interleaved = new Float32Array(frame.numberOfFrames * frame.numberOfChannels);
-      frame.copyTo(interleaved, { planeIndex: 0 });
+      // Interleaved copy of every channel; a planar frame copied plane-by-plane would break the rate.
+      frame.copyTo(interleaved, { planeIndex: 0, format: 'f32' });
+      stats.framesRead++;
+      for (let i = 0; i < interleaved.length; i++) {
+        const value = Math.abs(interleaved[i]);
+        if (value > stats.maxFrameAbs) stats.maxFrameAbs = value;
+      }
       frame.close();
       for (let i = 0; i < interleaved.length; i += CH) {
-        mono.push((interleaved[i] + interleaved[i + 1]) / 2);
+        mono.push(interleaved[i]);
       }
       while (mono.length >= perWindow) {
         const window = Float32Array.from(mono.splice(0, perWindow));
         windows.push({ app: amp(window, APP), pc: amp(window, PC) });
       }
     }
-    return windows;
+    return { windows, stats };
   })();
 })();
 `;
@@ -208,10 +221,11 @@ export const runSelftest = async (options: SelftestOptions): Promise<{ pass: boo
   offCapture();
   offHardware();
 
-  const injected = (await window.webContents.executeJavaScript(
+  const pageResult = (await window.webContents.executeJavaScript(
     'window.__selftestPromise',
     true
-  )) as Band[];
+  )) as { windows: Band[]; stats: Record<string, unknown> };
+  const injected = pageResult.windows;
 
   const concat = (parts: Float32Array[]): Float32Array => {
     const total = parts.reduce((sum, part) => sum + part.length, 0);
@@ -243,6 +257,11 @@ export const runSelftest = async (options: SelftestOptions): Promise<{ pass: boo
   if (injectedApp > MAX_LEAK) failures.push(`injected track carries app audio (${injectedApp.toFixed(3)})`);
 
   const pass = failures.length === 0;
+  if (!pass) {
+    log('capture series', JSON.stringify(captureBands.map((b) => [Number(b.pc.toFixed(3)), Number(b.app.toFixed(3))])));
+    log('injected series', JSON.stringify(injected.map((b) => [Number(b.pc.toFixed(3)), Number(b.app.toFixed(3))])));
+    log('page stats', JSON.stringify(pageResult.stats));
+  }
   log(
     `selftest ${pass ? 'PASS' : 'FAIL'} ` +
       `capture[pc=${capturePc.toFixed(3)} app=${captureApp.toFixed(3)}] ` +
