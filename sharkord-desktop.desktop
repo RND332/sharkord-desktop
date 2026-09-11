@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Sharkord
+Comment=Sharkord client with full-PC screen-share audio
+Exec=/home/rnd332/sharkord-desktop/bin/sharkord-desktop
+Terminal=false
+Categories=Network;InstantMessaging;
+StartupWMClass=Sharkord

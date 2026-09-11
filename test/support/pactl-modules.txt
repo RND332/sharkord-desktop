@@ -1,0 +1,223 @@
+Module #1
+	Name: libpipewire-module-rt
+	Argument: {
+            nice.level    = -11
+            rt.prio       = 88
+            #rt.time.soft = -1
+            #rt.time.hard = -1
+            #rlimits.enabled = true
+            rtportal.enabled = false
+            #rtkit.enabled = true
+            #uclamp.min = 0
+            #uclamp.max = 1024
+        }
+	Usage counter: n/a
+	Properties:
+		module.name = "libpipewire-module-rt"
+		object.id = "1"
+		object.serial = "1"
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Use realtime thread scheduling, falling back to RTKit"
+		module.usage = "( nice.level=<priority: default 20(don't change)> ) ( rt.prio=<priority: default 83> ) ( rt.time.soft=<in usec: default -1> ) ( rt.time.hard=<in usec: default -1> ) ( rlimits.enabled=<default true> ) ( rtportal.enabled=<default true> ) ( rtkit.enabled=<default true> ) ( uclamp.min=<default 0> ) ( uclamp.max=<default 1024> )"
+		module.version = "1.6.8"
+		nice.level = "-11"
+		rt.prio = "88"
+		rtportal.enabled = "false"
+
+Module #2
+	Name: libpipewire-module-protocol-native
+	Argument: {
+            # List of server Unix sockets, and optionally permissions
+            #sockets = [ { name = "pipewire-0" }, { name = "pipewire-0-manager" } ]
+        }
+	Usage counter: n/a
+	Properties:
+		module.name = "libpipewire-module-protocol-native"
+		object.id = "2"
+		object.serial = "2"
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Native protocol using unix sockets"
+		module.version = "1.6.8"
+
+Module #4
+	Name: libpipewire-module-profiler
+	Argument: {
+            #profile.interval.ms = 0
+        }
+	Usage counter: n/a
+	Properties:
+		module.name = "libpipewire-module-profiler"
+		object.id = "4"
+		object.serial = "4"
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Generate Profiling data"
+		module.usage = "( profile.interval.ms=<minimum interval for sampling data (in ms) ) "
+		module.version = "1.6.8"
+
+Module #6
+	Name: libpipewire-module-metadata
+	Argument: 
+	Usage counter: n/a
+	Properties:
+		module.name = "libpipewire-module-metadata"
+		object.id = "6"
+		object.serial = "6"
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Allow clients to create metadata store"
+		module.version = "1.6.8"
+
+Module #8
+	Name: libpipewire-module-spa-device-factory
+	Argument: 
+	Usage counter: n/a
+	Properties:
+		module.name = "libpipewire-module-spa-device-factory"
+		object.id = "8"
+		object.serial = "8"
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Provide a factory to make SPA devices"
+		module.version = "1.6.8"
+
+Module #10
+	Name: libpipewire-module-spa-node-factory
+	Argument: 
+	Usage counter: n/a
+	Properties:
+		module.name = "libpipewire-module-spa-node-factory"
+		object.id = "10"
+		object.serial = "10"
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Provide a factory to make SPA nodes"
+		module.version = "1.6.8"
+
+Module #12
+	Name: libpipewire-module-client-node
+	Argument: 
+	Usage counter: n/a
+	Properties:
+		module.name = "libpipewire-module-client-node"
+		object.id = "12"
+		object.serial = "12"
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Allow clients to create and control remote nodes"
+		module.version = "1.6.8"
+
+Module #14
+	Name: libpipewire-module-client-device
+	Argument: 
+	Usage counter: n/a
+	Properties:
+		module.name = "libpipewire-module-client-device"
+		object.id = "14"
+		object.serial = "14"
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Allow clients to create and control remote devices"
+		module.version = "1.6.8"
+
+Module #16
+	Name: libpipewire-module-portal
+	Argument: 
+	Usage counter: n/a
+	Properties:
+		module.name = "libpipewire-module-portal"
+		object.id = "16"
+		object.serial = "16"
+
+Module #17
+	Name: libpipewire-module-access
+	Argument: {
+            # Socket-specific access permissions
+            #access.socket = { pipewire-0 = "default", pipewire-0-manager = "unrestricted" }
+
+            # Deprecated legacy mode (not socket-based),
+            # for now enabled by default if access.socket is not specified
+            #access.legacy = true
+        }
+	Usage counter: n/a
+	Properties:
+		module.name = "libpipewire-module-access"
+		object.id = "17"
+		object.serial = "17"
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Perform access check"
+		module.usage = "( access.socket={ <socket>=<access>, ... } ) ( access.legacy=true ) "
+		module.version = "1.6.8"
+
+Module #18
+	Name: libpipewire-module-adapter
+	Argument: 
+	Usage counter: n/a
+	Properties:
+		module.name = "libpipewire-module-adapter"
+		object.id = "18"
+		object.serial = "18"
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Manage adapter nodes"
+		module.version = "1.6.8"
+
+Module #20
+	Name: libpipewire-module-link-factory
+	Argument: {
+            #allow.link.passive = false
+	}
+	Usage counter: n/a
+	Properties:
+		module.name = "libpipewire-module-link-factory"
+		object.id = "20"
+		object.serial = "20"
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Allow clients to create links"
+		module.usage = "( allow.link.passive=<bool, default false> ) "
+		module.version = "1.6.8"
+
+Module #22
+	Name: libpipewire-module-session-manager
+	Argument: 
+	Usage counter: n/a
+	Properties:
+		module.name = "libpipewire-module-session-manager"
+		object.id = "22"
+		object.serial = "22"
+		module.author = "George Kiagiadakis <george.kiagiadakis@collabora.com>"
+		module.description = "Implements objects for session management"
+		module.version = "1.6.8"
+
+Module #536870912
+	Name: module-always-sink
+	Argument: 
+	Usage counter: n/a
+	Properties:
+		module.author = "Pauli Virtanen <pav@iki.fi>"
+		module.description = "Always keeps at least one sink loaded even if it's a null one"
+		module.usage = "sink_name=<name of sink>"
+		module.version = "1.6.8"
+
+Module #536870913
+	Name: module-device-manager
+	Argument: 
+	Usage counter: n/a
+	Properties:
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Keep track of devices (and their descriptions) both past and present and prioritise by role"
+		module.usage = "do_routing=<Automatically route streams based on a priority list (unique per-role)?> on_hotplug=<When new device becomes available, recheck streams?> on_rescue=<When device becomes unavailable, recheck streams?>"
+		module.version = "1.6.8"
+
+Module #536870914
+	Name: module-device-restore
+	Argument: 
+	Usage counter: n/a
+	Properties:
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Automatically restore the volume/mute state of devices"
+		module.usage = "restore_port=<Save/restore port?> restore_volume=<Save/restore volumes?> restore_muted=<Save/restore muted states?> restore_formats=<Save/restore saved formats?>"
+		module.version = "1.6.8"
+
+Module #536870915
+	Name: module-stream-restore
+	Argument: 
+	Usage counter: n/a
+	Properties:
+		module.author = "Wim Taymans <wim.taymans@gmail.com>"
+		module.description = "Automatically restore the volume/mute/device state of streams"
+		module.usage = "restore_device=<Save/restore sinks/sources?> restore_volume=<Save/restore volumes?> restore_muted=<Save/restore muted states?> on_hotplug=<This argument is obsolete, please remove it from configuration> on_rescue=<This argument is obsolete, please remove it from configuration> fallback_table=<filename>"
+		module.version = "1.6.8"

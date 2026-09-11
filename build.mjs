@@ -29,7 +29,7 @@ await Promise.all([
   }),
   build({
     ...shared,
-    entryPoints: ['src/patch/index.ts'],
+    entryPoints: ['src/patch/entry.ts'],
     outfile: 'dist/patch.js',
     platform: 'browser',
     format: 'iife',
