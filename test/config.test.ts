@@ -10,10 +10,10 @@ describe('resolveMode', () => {
 });
 
 describe('loadConfig', () => {
-  it('prefers the CLI flag over the environment and the built-in default', () => {
+  it('prefers the CLI flag over the environment, and asks when neither is set', () => {
     expect(loadConfig(['--url=https://cli.test'], {}).url).toBe('https://cli.test');
     expect(loadConfig([], { SHARKORD_URL: 'https://env.test' }).url).toBe('https://env.test');
-    expect(loadConfig([], {}).url).toBe('https://sharkord.example.com');
+    expect(loadConfig([], {}).url).toBeNull();
   });
 
   it('reads sink name, device override and state path from the environment', () => {

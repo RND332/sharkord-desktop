@@ -26,8 +26,12 @@ Builds for all three platforms are produced by CI; only the Linux build can do t
 
 Download from [Releases](https://github.com/RND332/sharkord-desktop/releases): AppImage/deb,
 Windows installer/portable, macOS dmg/zip. macOS and Windows builds are unsigned, so expect a
-Gatekeeper/SmartScreen warning. The app points at `https://sharkord.example.com` by default — set
-`SHARKORD_URL` (or pass `--url=`) to use your own server.
+Gatekeeper/SmartScreen warning.
+
+On first start the app asks which server to open and remembers the answer in
+`<userData>/config.json`; change it later with **Ctrl/Cmd+Shift+S** or by setting `SHARKORD_URL`
+(passing `--url=` also works and wins over the stored value). Anything without a scheme is assumed to
+be `https://`, and the address is validated before it is used.
 
 ## How it works
 
@@ -73,7 +77,7 @@ bun run build && electron . --cleanup   # remove leftovers after a crash
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `SHARKORD_URL` | `https://sharkord.example.com` | web client to load (`--url=` also works) |
+| `SHARKORD_URL` | — (asks on first run) | web client to load (`--url=` also works; both beat the stored server) |
 | `SHARKORD_SINK_NAME` | `sharkord_capture` | name of the virtual capture sink |
 | `SHARKORD_HW_SINK` | current default sink | output device that keeps playing locally |
 | `SHARKORD_DEBUG_PCM` | — | dump the captured PCM to this WAV path while streaming |
@@ -93,10 +97,11 @@ The third row proves the tone really played; the middle row proves the track han
 carries it. Both tone levels are exactly the amplitude that was played (0.35).
 
 `bun run test` covers the pactl parsers against captured fixtures, the routing manager against a fake
-`pactl` (setup order, idempotent restart, stale cleanup, loopback repair, device loss, own-stream
-protection), the `parec` supervisor's restart policy, the PCM framing (byte-exact carry, per-channel
-RMS, Goertzel selectivity), patch behaviour (passthrough, merge, fallback, backpressure, release) and
-the platform/mode configuration.
+`pactl` (setup order, idempotent restart, stale cleanup while another instance is live, loopback
+repair, device loss, own-stream protection), the `parec` supervisor's restart policy, the PCM framing
+(byte-exact carry, per-channel RMS, Goertzel selectivity), patch behaviour (passthrough, merge,
+fallback, backpressure, release), and the server configuration (URL normalisation, hostile configs,
+storage round-trip).
 
 Electron on Linux has no default screen picker — `getDisplayMedia` rejects with `NotSupportedError`
 unless the app installs `setDisplayMediaRequestHandler`. This app installs one that calls
@@ -117,6 +122,8 @@ unless the app installs `setDisplayMediaRequestHandler`. This app installs one t
 
 | Path | Role |
 |---|---|
+| `src/main/server-config.ts` | server URL validation + storage |
+| `src/connect/connect.html` | first-run / change-server picker |
 | `src/main/pipewire.ts` | `pactl` wrapper + parsers |
 | `src/main/routing.ts` | virtual sink / loopback / default-sink lifecycle |
 | `src/main/capture.ts` | supervised `parec` |

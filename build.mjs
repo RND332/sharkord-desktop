@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { rm } from 'node:fs/promises';
+import { copyFile, mkdir, rm } from 'node:fs/promises';
 
 const shared = {
   bundle: true,
@@ -9,6 +9,8 @@ const shared = {
 };
 
 await rm('dist', { recursive: true, force: true });
+await mkdir('dist', { recursive: true });
+await copyFile('src/connect/connect.html', 'dist/connect.html');
 
 await Promise.all([
   build({

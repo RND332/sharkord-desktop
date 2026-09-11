@@ -5,6 +5,10 @@ type PcmHandler = (event: unknown, chunk: Uint8Array) => void;
 let holders = 0;
 
 const bridge = {
+  /** Used by the built-in server picker; harmless on the client page. */
+  currentServer: (): Promise<string | null> => ipcRenderer.invoke('server:current'),
+  submitServer: (url: string): Promise<{ ok: boolean; error?: string }> =>
+    ipcRenderer.invoke('server:submit', url),
   acquireCapture: async (): Promise<void> => {
     if (holders === 0) await ipcRenderer.invoke('capture:acquire');
     holders += 1;

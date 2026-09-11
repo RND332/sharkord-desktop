@@ -1,4 +1,4 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain, session } from 'electron';
+import { app, BrowserWindow, desktopCapturer, ipcMain, Menu, session } from 'electron';
 import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,6 +7,7 @@ import { loadConfig } from './config';
 import { Capture } from './capture';
 import { RoutingManager } from './routing';
 import { subscribe } from './pipewire';
+import { normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
 import { runSelftest } from './selftest';
 import { writeWav } from './wav';
 
@@ -23,8 +24,7 @@ let hardwareSink: string | null = null;
 let shuttingDown = false;
 const debugChunks: Buffer[] = [];
 
-const installPermissionHandlers = (): void => {
-  const origin = new URL(config.url).origin;
+const installPermissionHandlers = (origin: () => string): void => {
   const allowed: Record<string, true> = {
     media: true,
     'display-capture': true,
@@ -34,12 +34,12 @@ const installPermissionHandlers = (): void => {
   };
 
   session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
-    const fromApp = (contents?.getURL() ?? '').startsWith(origin);
+    const fromApp = origin() !== '' && (contents?.getURL() ?? '').startsWith(origin());
     callback(fromApp && allowed[permission] === true);
   });
 
   session.defaultSession.setPermissionCheckHandler((_contents, permission, requestingOrigin) => {
-    return requestingOrigin.startsWith(origin) && allowed[permission] === true;
+    return origin() !== '' && requestingOrigin.startsWith(origin()) && allowed[permission] === true;
   });
 
   // Electron has no default screen picker on Linux (getDisplayMedia rejects with NotSupportedError).
@@ -145,7 +145,12 @@ const bootstrap = async (): Promise<void> => {
     log(`${process.platform}: no PipeWire routing — screen-share audio follows the platform`);
   }
 
-  installPermissionHandlers();
+  const serverConfigPath = join(app.getPath('userData'), 'config.json');
+  const connectPagePath = join(__dirname, 'connect.html');
+  let allowedOrigin = '';
+  let currentServerUrl: string | null = null;
+
+  installPermissionHandlers(() => allowedOrigin);
   registerIpc();
   if (config.mode === 'capture') subscribe(scheduleHealthCheck);
 
@@ -191,31 +196,77 @@ const bootstrap = async (): Promise<void> => {
     return;
   }
 
-  await window.loadURL(config.url);
-  log('client loaded:', config.url);
+  const loadClient = async (url: string): Promise<void> => {
+    currentServerUrl = url;
+    allowedOrigin = new URL(url).origin;
+    await window.loadURL(url);
+    log('client loaded:', url);
 
-  if (config.mode !== 'capture') {
-    return;
-  }
+    if (config.mode !== 'capture') return;
 
-  // The patch is injected asynchronously from the preload; give it a moment before judging.
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    const readiness = (await window.webContents.executeJavaScript(
-      `({
-        bridge: typeof window.sharkordDesktop,
-        patched: !String(navigator.mediaDevices?.getDisplayMedia ?? '').includes('native code'),
-        generator: typeof MediaStreamTrackGenerator === 'function'
-      })`,
-      true
-    )) as { bridge: string; patched: boolean; generator: boolean };
-    if (readiness.bridge === 'object' && readiness.patched) {
-      log('screen-share audio ready:', JSON.stringify(readiness));
-      break;
+    // The patch is injected asynchronously from the preload; give it a moment before judging.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const readiness = (await window.webContents.executeJavaScript(
+        `({
+          bridge: typeof window.sharkordDesktop,
+          patched: !String(navigator.mediaDevices?.getDisplayMedia ?? '').includes('native code'),
+          generator: typeof MediaStreamTrackGenerator === 'function'
+        })`,
+        true
+      )) as { bridge: string; patched: boolean; generator: boolean };
+      if (readiness.bridge === 'object' && readiness.patched) {
+        log('screen-share audio ready:', JSON.stringify(readiness));
+        break;
+      }
+      if (attempt === 9) {
+        log('WARNING: screen-share audio patch is not installed:', JSON.stringify(readiness));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
-    if (attempt === 9) {
-      log('WARNING: screen-share audio patch is not installed:', JSON.stringify(readiness));
+  };
+
+  ipcMain.handle('server:current', () => currentServerUrl);
+  ipcMain.handle('server:submit', async (_event, raw: unknown) => {
+    const normalized = normalizeServerUrl(typeof raw === 'string' ? raw : '');
+    if (!normalized) {
+      return { ok: false, error: 'Enter an address such as https://sharkord.example.com' };
     }
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    try {
+      saveServerUrl(serverConfigPath, normalized);
+      await loadClient(normalized);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      {
+        label: 'Server',
+        submenu: [
+          {
+            label: 'Change server…',
+            accelerator: 'CmdOrCtrl+Shift+S',
+            click: () => {
+              void window.loadFile(connectPagePath);
+            }
+          },
+          { type: 'separator' },
+          { role: 'quit' }
+        ]
+      },
+      { role: 'editMenu' },
+      { role: 'viewMenu' }
+    ])
+  );
+
+  const startUrl = config.url ?? readServerUrl(serverConfigPath);
+  if (startUrl) {
+    await loadClient(startUrl);
+  } else {
+    await window.loadFile(connectPagePath);
+    log('no server chosen yet, showing the picker');
   }
 
   window.on('closed', () => {

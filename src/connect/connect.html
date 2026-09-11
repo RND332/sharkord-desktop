@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+    />
+    <title>Sharkord Desktop</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #0b0d12;
+        color: #e5e7eb;
+        font: 15px/1.5 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      }
+      main {
+        width: min(460px, 90vw);
+      }
+      h1 {
+        margin: 0 0 4px;
+        font-size: 22px;
+        letter-spacing: -0.01em;
+      }
+      p {
+        margin: 0 0 20px;
+        color: #94a3b8;
+      }
+      form {
+        display: flex;
+        gap: 8px;
+      }
+      input {
+        flex: 1;
+        padding: 11px 13px;
+        border-radius: 9px;
+        border: 1px solid #263043;
+        background: #111827;
+        color: inherit;
+        font: inherit;
+      }
+      input:focus {
+        outline: 2px solid #0ea5e9;
+        outline-offset: 1px;
+      }
+      button {
+        padding: 11px 16px;
+        border: 0;
+        border-radius: 9px;
+        background: #0ea5e9;
+        color: #04121b;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+      #error {
+        min-height: 20px;
+        margin-top: 12px;
+        color: #f87171;
+      }
+      small {
+        color: #64748b;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Sharkord Desktop</h1>
+      <p>Which server should this client open?</p>
+      <form id="form">
+        <input
+          id="url"
+          type="text"
+          placeholder="https://sharkord.example.com"
+          autocomplete="off"
+          spellcheck="false"
+          autofocus
+        />
+        <button id="submit" type="submit">Connect</button>
+      </form>
+      <div id="error"></div>
+      <small>Change it later with Ctrl/Cmd+Shift+S. Saved per user.</small>
+    </main>
+    <script>
+      const form = document.getElementById('form');
+      const input = document.getElementById('url');
+      const button = document.getElementById('submit');
+      const error = document.getElementById('error');
+
+      const bridge = window.sharkordDesktop;
+      if (!bridge) {
+        error.textContent = 'Preload bridge missing — this window was opened incorrectly.';
+        form.hidden = true;
+      } else {
+        bridge.currentServer().then((url) => {
+          if (url) input.value = url;
+        });
+      }
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        error.textContent = '';
+        button.disabled = true;
+        try {
+          const result = await bridge.submitServer(input.value);
+          if (!result.ok) {
+            error.textContent = result.error || 'That server could not be used.';
+            button.disabled = false;
+          }
+        } catch (failure) {
+          error.textContent = String(failure);
+          button.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>

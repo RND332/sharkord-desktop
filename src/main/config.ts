@@ -11,8 +11,8 @@ export const resolveMode = (platform: NodeJS.Platform): CaptureMode =>
   platform === 'linux' ? 'capture' : 'passthrough';
 
 export type Config = {
-  /** Web client to load. */
-  url: string;
+  /** Web client to load, or null when the user has not chosen a server yet. */
+  url: string | null;
   /** Whether this build captures audio itself (Linux/PipeWire) or leaves it to the platform. */
   mode: CaptureMode;
   /** Name of the null sink every non-Sharkord stream is routed into. */
@@ -41,7 +41,7 @@ export const loadConfig = (
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform
 ): Config => ({
-  url: argValue(argv, 'url') ?? env.SHARKORD_URL ?? 'https://sharkord.example.com',
+  url: argValue(argv, 'url') ?? env.SHARKORD_URL ?? null,
   mode: resolveMode(platform),
   sinkName: env.SHARKORD_SINK_NAME ?? 'sharkord_capture',
   hwSink: env.SHARKORD_HW_SINK ?? null,
