@@ -46,6 +46,7 @@ jobs:
             release/*.AppImage
             release/*.deb
             release/*.exe
+            release/*.pacman
             release/*.dmg
             release/*.zip
             release/*.blockmap

@@ -74,8 +74,9 @@ bun run dist:linux     # packaged builds (dist:win, dist:mac on those hosts)
 bun run build && electron . --cleanup   # remove the virtual sink an older version left behind
 ```
 
-`bin/sharkord-desktop` is a launcher for a desktop entry; `sharkord-desktop.desktop` can be copied to
-`~/.local/share/applications/` (edit the `Exec` path).
+`scripts/install-local.sh` installs the packaged app for the current user without root: binary in
+`~/.local/opt`, `sharkord-desktop` on `PATH`, plus icon and desktop entry. Re-run it after an update.
+Arch users can also `sudo pacman -U` the `.pacman` from Releases.
 
 ### Configuration
 

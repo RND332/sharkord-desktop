@@ -34,7 +34,8 @@
     "linux": {
       "target": [
         "AppImage",
-        "deb"
+        "deb",
+        "pacman"
       ],
       "category": "Network",
       "synopsis": "Sharkord client with full-PC screen-share audio (PipeWire)"
