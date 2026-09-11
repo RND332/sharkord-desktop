@@ -41,7 +41,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.os }}
-          path: release/*
+          # Installers only: release/* would also drag the unpacked app directories along.
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.exe
+            release/*.dmg
+            release/*.zip
+            release/*.blockmap
           if-no-files-found: error
 
   release:
@@ -55,6 +62,8 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Show what will be published
+        run: ls -lh artifacts
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**
