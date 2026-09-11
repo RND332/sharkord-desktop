@@ -4,8 +4,8 @@ import { join } from 'node:path';
 export type CaptureMode = 'capture' | 'passthrough';
 
 /**
- * Capturing "everything except this app" is a PipeWire arrangement; on Windows and macOS the
- * client keeps whatever audio the platform and the browser hand it.
+ * Recording other applications' streams is a PipeWire arrangement; on Windows and macOS the client
+ * keeps whatever audio the platform and the browser hand it.
  */
 export const resolveMode = (platform: NodeJS.Platform): CaptureMode =>
   platform === 'linux' ? 'capture' : 'passthrough';
@@ -13,19 +13,17 @@ export const resolveMode = (platform: NodeJS.Platform): CaptureMode =>
 export type Config = {
   /** Web client to load, or null when the user has not chosen a server yet. */
   url: string | null;
-  /** Whether this build captures audio itself (Linux/PipeWire) or leaves it to the platform. */
+  /** Whether this build records audio itself (Linux/PipeWire) or leaves it to the platform. */
   mode: CaptureMode;
-  /** Name of the null sink every non-Sharkord stream is routed into. */
-  sinkName: string;
-  /** Force a specific output device; by default whatever is default when the app starts. */
-  hwSink: string | null;
-  /** Dump the captured PCM to this path (verification/debugging). */
+  /** Name of the recording node every other application is linked into. */
+  tapName: string;
+  /** Dump the recorded PCM to this path (verification/debugging). */
   debugPcm: string | null;
-  /** Where routing state survives a crash. */
-  statePath: string;
+  /** Where the first design kept its virtual-sink state; only used for cleanup. */
+  legacyStatePath: string;
   /** Run the tone-exclusion self test instead of the normal UI. */
   selftest: boolean;
-  /** Tear down leftovers from a previous run and exit. */
+  /** Tear down leftovers from an older version and exit. */
   cleanup: boolean;
 };
 
@@ -43,11 +41,9 @@ export const loadConfig = (
 ): Config => ({
   url: argValue(argv, 'url') ?? env.SHARKORD_URL ?? null,
   mode: resolveMode(platform),
-  sinkName: env.SHARKORD_SINK_NAME ?? 'sharkord_capture',
-  hwSink: env.SHARKORD_HW_SINK ?? null,
+  tapName: env.SHARKORD_TAP_NAME ?? 'sharkord_capture',
   debugPcm: env.SHARKORD_DEBUG_PCM ?? null,
-  statePath:
-    env.SHARKORD_STATE_PATH ?? join(env.XDG_RUNTIME_DIR ?? homedir(), 'sharkord-desktop.json'),
+  legacyStatePath: join(env.XDG_RUNTIME_DIR ?? homedir(), 'sharkord-desktop.json'),
   selftest: argv.includes('--selftest'),
   cleanup: argv.includes('--cleanup')
 });

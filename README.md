@@ -35,29 +35,33 @@ be `https://`, and the address is validated before it is used.
 
 ## How it works
 
-The client's playback is the noise everyone else hears back, so it is kept out of the captured signal
-by construction:
+Nothing about your audio setup is touched: no sink is created, no default device changes, no stream is
+moved. The app opens a plain PipeWire **recording node** and links every *other* application's playback
+into it:
 
 ```text
-games / browser / YouTube ──►  [sharkord_capture]  (null sink, DEFAULT)  ──monitor──► parec ──► injected
-                                          │                                                       audio track
-                                          └─monitor──► loopback ──► [real output device] ──► you hear it
-                                                                                                    │
-this app  ──(PULSE_SINK=<real output>)───────────────────────────► [real output device] ──► you hear  │
-                                                                   the voice channel            ▼
-                                                                   (never captured)   Sharkord SCREEN_AUDIO
+game ─┐
+music ├─► (their own devices, unchanged) ──► you hear everything as before
+browser┘         │
+                 └────────► [sharkord_capture]  (a pw-record node, not a device)
+                                      │
+                                      ▼
+                          injected audio track ──► Sharkord SCREEN_AUDIO producer
+
+this app's own playback is never linked ──► viewers never hear themselves
 ```
 
-1. On start the app creates a null sink, makes it the PipeWire default (so every other application
-   lands there) and loops it back to your real output device — you keep hearing everything.
-2. The app's own audio is pinned to the real output device with `PULSE_SINK`, so the voice channel is
-   audible to you and absent from the capture.
-3. When the Sharkord client asks for a screen share, the injected patch calls the normal picker for
-   video and attaches an audio track built from `parec sharkord_capture.monitor` via
-   `MediaStreamTrackGenerator`. The client publishes it as its usual `SCREEN_AUDIO` producer.
+1. When a screen share starts, the app runs `pw-record` with `node.autoconnect=false` — no device
+   appears anywhere, only a recording stream while you share.
+2. Every other application's output ports are linked into that node (`pw-link`), mono fanned out to
+   both sides; links are re-checked once a second so apps that start later are picked up.
+3. The client's own playback is excluded by process tree, so the voice channel is audible to you and
+   absent from the capture.
+4. The captured PCM is injected as a real audio track into a main-world patch of `getDisplayMedia`,
+   and the stock Sharkord client publishes it as its usual `SCREEN_AUDIO` producer.
 
-Everything reverses on exit: the default sink is restored, the modules are unloaded, and streams that
-were on the capture sink are relocated by WirePlumber.
+Closing the window keeps the app in the tray (capture and voice stay connected); quit from the tray
+menu or with Ctrl/Cmd+Q.
 
 ## Usage
 
@@ -67,7 +71,7 @@ bun run start          # build + launch
 bun run test           # unit tests
 bun run selftest       # proves the app's own audio is excluded from the capture
 bun run dist:linux     # packaged builds (dist:win, dist:mac on those hosts)
-bun run build && electron . --cleanup   # remove leftovers after a crash
+bun run build && electron . --cleanup   # remove the virtual sink an older version left behind
 ```
 
 `bin/sharkord-desktop` is a launcher for a desktop entry; `sharkord-desktop.desktop` can be copied to
@@ -78,30 +82,30 @@ bun run build && electron . --cleanup   # remove leftovers after a crash
 | Variable | Default | Meaning |
 |---|---|---|
 | `SHARKORD_URL` | — (asks on first run) | web client to load (`--url=` also works; both beat the stored server) |
-| `SHARKORD_SINK_NAME` | `sharkord_capture` | name of the virtual capture sink |
-| `SHARKORD_HW_SINK` | current default sink | output device that keeps playing locally |
-| `SHARKORD_DEBUG_PCM` | — | dump the captured PCM to this WAV path while streaming |
+| `SHARKORD_TAP_NAME` | `sharkord_capture` | name of the recording node other apps are linked into |
+| `SHARKORD_DEBUG_PCM` | — | dump the recorded PCM to this WAV path while streaming |
 
 ## Verification
 
 `bun run selftest` plays a 997 Hz tone *inside the app window* and a 1493 Hz tone from an unrelated
-process into the capture sink, then measures three signals (last run, 2026-09-12):
+process (launched with `setsid`, so it looks like any other application), then measures three signals
+(last run, 2026-09-12):
 
-| signal | pc tone (must be captured) | app tone (must not leak) |
+| signal | another app's tone (must be captured) | the client's own tone (must not leak) |
 |---|---|---|
-| capture sink monitor | `0.350` | `0.001` |
+| the tap (`pw-record` node with linked streams) | `0.350` | `0.000` |
 | injected track read back in the renderer | `0.350` | `0.001` |
 | hardware monitor (control) | — | `0.350` |
 
 The third row proves the tone really played; the middle row proves the track handed to the client
-carries it. Both tone levels are exactly the amplitude that was played (0.35).
+carries it. Both tone levels are exactly the amplitude that was played (0.35), and the same run
+asserts that the default sink, the module list and the sink list are untouched.
 
-`bun run test` covers the pactl parsers against captured fixtures, the routing manager against a fake
-`pactl` (setup order, idempotent restart, stale cleanup while another instance is live, loopback
-repair, device loss, own-stream protection), the `parec` supervisor's restart policy, the PCM framing
-(byte-exact carry, per-channel RMS, Goertzel selectivity), patch behaviour (passthrough, merge,
-fallback, backpressure, release), and the server configuration (URL normalisation, hostile configs,
-storage round-trip).
+`bun run test` covers the PipeWire graph parsing (node ids, port directions, `pw-dump` shapes), the
+link planner (mono fan-out, own-process exclusion, idempotency, links forgotten when a stream
+disappears), the PCM framing (byte-exact carry, per-channel RMS, Goertzel selectivity), patch
+behaviour (passthrough, merge, fallback, backpressure, release), the server configuration (URL
+normalisation, hostile configs, storage round-trip) and the platform mode.
 
 Electron on Linux has no default screen picker — `getDisplayMedia` rejects with `NotSupportedError`
 unless the app installs `setDisplayMediaRequestHandler`. This app installs one that calls
@@ -114,9 +118,10 @@ unless the app installs `setDisplayMediaRequestHandler`. This app installs one t
 - The audio exclusion is Linux/PipeWire only; the whole point is routing that Windows/macOS do
   differently.
 - Applications that bypass the PipeWire graph (raw ALSA exclusive mode) are not captured.
-- Any *other* Sharkord client on the machine (a browser tab) plays through the virtual sink and would
-  therefore be part of the stream — use this app as your client while streaming.
-- Audio you deliberately route to a second device stays there; the stream carries the default sink.
+- Per-application volume and mute are honoured (the tap is taken after them); a sink's own volume or
+  mute is not, because the tap never passes through the device.
+- Any *other* Sharkord client on the machine (a browser tab) is a separate application, so it *is*
+  captured — use this app as your client while streaming.
 
 ## Layout
 
@@ -124,9 +129,8 @@ unless the app installs `setDisplayMediaRequestHandler`. This app installs one t
 |---|---|
 | `src/main/server-config.ts` | server URL validation + storage |
 | `src/connect/connect.html` | first-run / change-server picker |
-| `src/main/pipewire.ts` | `pactl` wrapper + parsers |
-| `src/main/routing.ts` | virtual sink / loopback / default-sink lifecycle |
-| `src/main/capture.ts` | supervised `parec` |
+| `src/main/tap.ts` | recording node + per-application link management |
+| `src/main/legacy.ts` | cleans up the virtual sink older versions created |
 | `src/main/selftest.ts` | tone-exclusion proof |
 | `src/preload/index.ts` | capture bridge |
 | `src/patch/` | main-world `getDisplayMedia` patch |

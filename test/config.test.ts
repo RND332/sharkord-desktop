@@ -16,25 +16,19 @@ describe('loadConfig', () => {
     expect(loadConfig([], {}).url).toBeNull();
   });
 
-  it('reads sink name, device override and state path from the environment', () => {
+  it('reads the tap name, debug path and legacy state path from the environment', () => {
     const config = loadConfig([], {
-      SHARKORD_SINK_NAME: 'probe_sink',
-      SHARKORD_HW_SINK: 'alsa_output.hw',
+      SHARKORD_TAP_NAME: 'probe_tap',
       SHARKORD_DEBUG_PCM: '/tmp/capture.wav',
       XDG_RUNTIME_DIR: '/run/user/1234'
     });
 
     expect(config).toMatchObject({
-      sinkName: 'probe_sink',
-      hwSink: 'alsa_output.hw',
+      tapName: 'probe_tap',
       debugPcm: '/tmp/capture.wav',
-      statePath: '/run/user/1234/sharkord-desktop.json',
+      legacyStatePath: '/run/user/1234/sharkord-desktop.json',
       mode: 'capture'
     });
-  });
-
-  it('honours an explicit state path', () => {
-    expect(loadConfig([], { SHARKORD_STATE_PATH: '/tmp/custom.json' }).statePath).toBe('/tmp/custom.json');
   });
 
   it('recognises the maintenance flags', () => {

@@ -1,4 +1,5 @@
 import { build } from 'esbuild';
+import { existsSync } from 'node:fs';
 import { copyFile, mkdir, rm } from 'node:fs/promises';
 
 const shared = {
@@ -11,6 +12,10 @@ const shared = {
 await rm('dist', { recursive: true, force: true });
 await mkdir('dist', { recursive: true });
 await copyFile('src/connect/connect.html', 'dist/connect.html');
+if (!existsSync('build/icon.png')) {
+  throw new Error('build/icon.png is missing — run `bun run icon`');
+}
+await copyFile('build/icon.png', 'dist/icon.png');
 
 await Promise.all([
   build({

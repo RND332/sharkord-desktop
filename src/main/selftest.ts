@@ -1,17 +1,15 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrowserWindow } from 'electron';
-import { Capture } from './capture';
 import type { Config } from './config';
-import type { RoutingManager } from './routing';
-import { getDefaultSink, realRunner } from './pipewire';
+import type { TapCapture } from './tap';
 import { amplitudeAt } from '../shared/pcm';
 import { writeWav } from './wav';
 
 /** Played inside the app window: this is the voice channel and must never reach viewers. */
 const APP_TONE_HZ = 997;
-/** Played by an unrelated process into the capture sink: this is "the rest of the PC". */
+/** Played by an unrelated process: this is "the rest of the PC" and must be captured. */
 const PC_TONE_HZ = 1493;
 const TONE_AMPLITUDE = 0.35;
 const SAMPLE_RATE = 48000;
@@ -23,18 +21,17 @@ const TAIL_MS = 1200;
 
 export type SelftestOptions = {
   config: Config;
-  routing: RoutingManager;
-  capture: Capture;
+  tap: TapCapture;
   window: BrowserWindow;
-  hardwareSink: string;
   log: (...parts: unknown[]) => void;
 };
 
 type Band = { app: number; pc: number };
 type Report = {
   capture: Band[];
-  hardware: Band[];
+  control: Band[];
   injected: Band[];
+  linked: number;
   pass: boolean;
   failures: string[];
 };
@@ -42,6 +39,23 @@ type Report = {
 const sleep = (ms: number): Promise<void> => {
   const { promise, resolve } = Promise.withResolvers<void>();
   setTimeout(resolve, ms);
+  return promise;
+};
+
+const getDefaultSink = (): Promise<string> => {
+  const { promise, resolve, reject } = Promise.withResolvers<string>();
+  execFile('pactl', ['get-default-sink'], (error, stdout) => {
+    if (error) reject(error);
+    else resolve(stdout.trim());
+  });
+  return promise;
+};
+
+const hasLegacyModules = (): Promise<boolean> => {
+  const { promise, resolve } = Promise.withResolvers<boolean>();
+  execFile('pactl', ['list', 'modules'], (error, stdout) => {
+    resolve(!error && stdout.includes('sink_name=sharkord_capture'));
+  });
   return promise;
 };
 
@@ -75,9 +89,18 @@ const bandsFrom = (samples: Float32Array): Band[] => {
 
 /** Ignore the first and last window: the tones start and stop inside them. */
 const settled = (bands: Band[], key: keyof Band): number =>
-  bands.length <= 2
-    ? 0
-    : Math.max(...bands.slice(1, -1).map((band) => band[key]));
+  bands.length <= 2 ? 0 : Math.max(...bands.slice(1, -1).map((band) => band[key]));
+
+const concat = (parts: Float32Array[]): Float32Array => {
+  const total = parts.reduce((sum, part) => sum + part.length, 0);
+  const out = new Float32Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+};
 
 const toneWav = async (path: string, freq: number, seconds: number): Promise<void> => {
   const frames = Math.floor(SAMPLE_RATE * seconds);
@@ -88,6 +111,20 @@ const toneWav = async (path: string, freq: number, seconds: number): Promise<voi
     samples[i * CHANNELS + 1] = value;
   }
   await writeWav(path, samples, SAMPLE_RATE, CHANNELS);
+};
+
+/** Records a monitor the way any recorder would — read-only, nothing in the session changes. */
+const recordMonitor = (device: string, onData: (chunk: Buffer) => void): ChildProcess => {
+  const child = spawn('parec', [
+    '-d',
+    device,
+    '--format=float32le',
+    '--rate=48000',
+    '--channels=2',
+    '--latency-msec=20'
+  ]);
+  child.stdout.on('data', onData);
+  return child;
 };
 
 const pageSetup = (measureMs: number): string => `
@@ -148,12 +185,12 @@ const pageSetup = (measureMs: number): string => `
       const interleaved = new Float32Array(frame.numberOfFrames * frame.numberOfChannels);
       // Interleaved copy of every channel; a planar frame copied plane-by-plane would break the rate.
       frame.copyTo(interleaved, { planeIndex: 0, format: 'f32' });
+      frame.close();
       stats.framesRead++;
       for (let i = 0; i < interleaved.length; i++) {
         const value = Math.abs(interleaved[i]);
         if (value > stats.maxFrameAbs) stats.maxFrameAbs = value;
       }
-      frame.close();
       for (let i = 0; i < interleaved.length; i += CH) {
         mono.push(interleaved[i]);
       }
@@ -168,31 +205,29 @@ const pageSetup = (measureMs: number): string => `
 `;
 
 export const runSelftest = async (options: SelftestOptions): Promise<{ pass: boolean; report: Report }> => {
-  const { config, routing, capture, window, hardwareSink, log } = options;
+  const { config, tap, window, log } = options;
   const failures: string[] = [];
-  const captureSamples: Float32Array[] = [];
-  const hardwareSamples: Float32Array[] = [];
 
-  const defaultSink = await getDefaultSink(realRunner);
-  if (defaultSink !== config.sinkName) {
-    failures.push(`default sink is ${defaultSink}, expected ${config.sinkName}`);
+  if (config.mode !== 'capture') {
+    log('selftest needs Linux/PipeWire');
+    return { pass: false, report: { capture: [], control: [], injected: [], linked: 0, pass: false, failures: ['unsupported platform'] } };
   }
-  if (!routing.state.active) failures.push('routing manager is not active');
 
-  const offCapture = capture.onData((chunk) => captureSamples.push(toMono(chunk)));
-  const stereo = new Capture({
-    sinkName: hardwareSink,
-    log: () => {}
-  });
-  const offHardware = stereo.onData((chunk) => hardwareSamples.push(toMono(chunk)));
+  // Nothing about the session's audio routing may have changed.
+  const defaultSink = await getDefaultSink();
+  if (defaultSink === config.tapName) failures.push('the capture node became the default sink');
+  if (await hasLegacyModules()) failures.push('legacy virtual-sink modules are still loaded');
+
+  const captureSamples: Float32Array[] = [];
+  const controlSamples: Float32Array[] = [];
+  tap.onData((chunk) => captureSamples.push(toMono(chunk)));
+  tap.start();
+  const control = recordMonitor(`${defaultSink}.monitor`, (chunk) => controlSamples.push(toMono(chunk)));
 
   const tonePath = join(tmpdir(), 'sharkord-desktop-selftest-tone.wav');
   await toneWav(tonePath, PC_TONE_HZ, TONE_SECONDS);
 
-  capture.start();
-  stereo.start();
   await sleep(WARMUP_MS);
-
   await window.webContents.executeJavaScript(pageSetup(TONE_SECONDS * 1000 + 800), true);
   const appTone = await window.webContents.executeJavaScript(
     `(async () => {
@@ -210,16 +245,16 @@ export const runSelftest = async (options: SelftestOptions): Promise<{ pass: boo
     true
   );
 
-  const pcTone: ChildProcess = spawn('paplay', [`--device=${config.sinkName}`, tonePath]);
+  // An ordinary application, playing to the user's own device. It must not be a child of this
+  // process, or the tap would (correctly) treat it as our own playback — hence setsid.
+  const pcTone = spawn('setsid', ['paplay', tonePath], { detached: true, stdio: 'ignore' });
   pcTone.on('error', (error) => failures.push(`paplay failed: ${error.message}`));
 
   await sleep(TONE_SECONDS * 1000 + TAIL_MS);
 
   pcTone.kill();
-  capture.stop();
-  stereo.stop();
-  offCapture();
-  offHardware();
+  control.kill();
+  tap.stop();
 
   const pageResult = (await window.webContents.executeJavaScript(
     'window.__selftestPromise',
@@ -227,34 +262,23 @@ export const runSelftest = async (options: SelftestOptions): Promise<{ pass: boo
   )) as { windows: Band[]; stats: Record<string, unknown> };
   const injected = pageResult.windows;
 
-  const concat = (parts: Float32Array[]): Float32Array => {
-    const total = parts.reduce((sum, part) => sum + part.length, 0);
-    const out = new Float32Array(total);
-    let offset = 0;
-    for (const part of parts) {
-      out.set(part, offset);
-      offset += part.length;
-    }
-    return out;
-  };
-
   const captureBands = bandsFrom(concat(captureSamples));
-  const hardwareBands = bandsFrom(concat(hardwareSamples));
+  const controlBands = bandsFrom(concat(controlSamples));
 
   const capturePc = settled(captureBands, 'pc');
   const captureApp = settled(captureBands, 'app');
-  const hardwareApp = settled(hardwareBands, 'app');
+  const controlApp = settled(controlBands, 'app');
   const injectedPc = settled(injected, 'pc');
   const injectedApp = settled(injected, 'app');
 
   const MIN_TONE = 0.15;
   const MAX_LEAK = 0.02;
 
-  if (capturePc < MIN_TONE) failures.push(`other apps' audio missing from the capture (${capturePc.toFixed(3)})`);
-  if (captureApp > MAX_LEAK) failures.push(`app audio leaked into the capture (${captureApp.toFixed(3)})`);
-  if (hardwareApp < MIN_TONE) failures.push(`app audio was not audible at all (${hardwareApp.toFixed(3)})`);
+  if (capturePc < MIN_TONE) failures.push(`another app's audio missing from the capture (${capturePc.toFixed(3)})`);
+  if (captureApp > MAX_LEAK) failures.push(`the client's own audio leaked into the capture (${captureApp.toFixed(3)})`);
+  if (controlApp < MIN_TONE) failures.push(`the app tone was not audible at all (${controlApp.toFixed(3)})`);
   if (injectedPc < MIN_TONE) failures.push(`injected track is silent (${injectedPc.toFixed(3)})`);
-  if (injectedApp > MAX_LEAK) failures.push(`injected track carries app audio (${injectedApp.toFixed(3)})`);
+  if (injectedApp > MAX_LEAK) failures.push(`injected track carries the client's own audio (${injectedApp.toFixed(3)})`);
 
   const pass = failures.length === 0;
   if (!pass) {
@@ -265,13 +289,21 @@ export const runSelftest = async (options: SelftestOptions): Promise<{ pass: boo
   log(
     `selftest ${pass ? 'PASS' : 'FAIL'} ` +
       `capture[pc=${capturePc.toFixed(3)} app=${captureApp.toFixed(3)}] ` +
-      `hardware[app=${hardwareApp.toFixed(3)}] ` +
-      `injected[pc=${injectedPc.toFixed(3)} app=${injectedApp.toFixed(3)}] appTone=${JSON.stringify(appTone)}` +
+      `control[app=${controlApp.toFixed(3)}] ` +
+      `injected[pc=${injectedPc.toFixed(3)} app=${injectedApp.toFixed(3)}] ` +
+      `defaultSink=${defaultSink} appTone=${JSON.stringify(appTone)}` +
       (pass ? '' : ` failures=${failures.join('; ')}`)
   );
 
   return {
     pass,
-    report: { capture: captureBands, hardware: hardwareBands, injected, pass, failures }
+    report: {
+      capture: captureBands,
+      control: controlBands,
+      injected,
+      linked: tap.linkedCount,
+      pass,
+      failures
+    }
   };
 };

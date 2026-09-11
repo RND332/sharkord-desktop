@@ -1,14 +1,13 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain, Menu, session } from 'electron';
+import { app, BrowserWindow, desktopCapturer, ipcMain, Menu, nativeImage, session, Tray } from 'electron';
 import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from './config';
-import { Capture } from './capture';
-import { RoutingManager } from './routing';
-import { subscribe } from './pipewire';
+import { removeLegacyRouting } from './legacy';
 import { normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
 import { runSelftest } from './selftest';
+import { TapCapture } from './tap';
 import { writeWav } from './wav';
 
 const config = loadConfig();
@@ -16,12 +15,13 @@ const log = (...parts: unknown[]): void => {
   console.log('[sharkord-desktop]', ...parts);
 };
 
-const capture = new Capture({ sinkName: config.sinkName, log });
+const tap = new TapCapture({ tapName: config.tapName, log });
 
-let routing: RoutingManager;
 let mainWindow: BrowserWindow | null = null;
-let hardwareSink: string | null = null;
+let tray: Tray | null = null;
 let shuttingDown = false;
+let allowedOrigin = '';
+let currentServerUrl: string | null = null;
 const debugChunks: Buffer[] = [];
 
 const installPermissionHandlers = (origin: () => string): void => {
@@ -66,24 +66,16 @@ const installPermissionHandlers = (origin: () => string): void => {
   });
 };
 
-let healthTimer: NodeJS.Timeout | null = null;
-const scheduleHealthCheck = (): void => {
-  if (healthTimer || shuttingDown) return;
-  healthTimer = setTimeout(() => {
-    healthTimer = null;
-    routing.ensureHealthy().catch((error) => log('health check failed:', error));
-  }, 500);
-};
-
 const registerIpc = (): void => {
   ipcMain.handle('patch:source', async () => readFile(join(__dirname, 'patch.js'), 'utf8'));
   ipcMain.handle('capture:acquire', () => {
-    capture.start();
+    if (config.mode !== 'capture') return;
+    tap.start();
   });
   ipcMain.handle('capture:release', () => {
-    capture.stop();
+    tap.stop();
   });
-  capture.onData((chunk) => {
+  tap.onData((chunk) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('pcm', chunk);
     }
@@ -95,118 +87,165 @@ const shutdown = async (code: number): Promise<void> => {
   if (shuttingDown) return;
   shuttingDown = true;
   try {
-    capture.stop();
+    tap.stop();
   } catch (error) {
     log('capture stop failed:', error);
   }
+
   if (config.debugPcm && debugChunks.length > 0) {
     try {
-      const interleaved = new Float32Array(
-        Buffer.concat(debugChunks).buffer,
-        0,
-        Math.floor(debugChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0) / 4)
-      );
-      await writeWav(config.debugPcm, interleaved, 48000, 2);
-      log('captured PCM written to', config.debugPcm);
+      const bytes = Buffer.concat(debugChunks);
+      const samples = new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4));
+      await writeWav(config.debugPcm, samples, 48000, 2);
+      log('recorded PCM written to', config.debugPcm);
     } catch (error) {
       log('could not write debug PCM:', error);
     }
   }
-  try {
-    routing?.stopSync();
-  } catch (error) {
-    log('routing teardown failed:', error);
-  }
+
   app.exit(code);
 };
 
 const bootstrap = async (): Promise<void> => {
-  routing = new RoutingManager({
-    statePath: config.statePath,
-    sinkName: config.sinkName,
-    hwSinkOverride: config.hwSink,
-    log
-  });
-
   if (config.cleanup) {
-    if (config.mode === 'capture') await routing.cleanupStale();
-    log('cleanup done');
+    removeLegacyRouting(config.legacyStatePath, log);
     app.exit(0);
     return;
   }
 
-  if (config.mode === 'capture') {
-    const routingState = await routing.start();
-    hardwareSink = routingState.hwSink;
-    // Our own playback never goes through the capture sink, so the voice channel is never re-broadcast.
-    if (hardwareSink) process.env.PULSE_SINK = hardwareSink;
-    log('routing up:', JSON.stringify(routingState));
-  } else {
-    log(`${process.platform}: no PipeWire routing — screen-share audio follows the platform`);
-  }
-
-  const serverConfigPath = join(app.getPath('userData'), 'config.json');
-  const connectPagePath = join(__dirname, 'connect.html');
-  let allowedOrigin = '';
-  let currentServerUrl: string | null = null;
-
   installPermissionHandlers(() => allowedOrigin);
   registerIpc();
-  if (config.mode === 'capture') subscribe(scheduleHealthCheck);
 
   const preloadPath = join(__dirname, 'preload.js');
   if (!existsSync(preloadPath)) log('WARNING: preload bundle missing at', preloadPath);
 
-  const window = new BrowserWindow({
-    width: 1280,
-    height: 840,
-    title: 'Sharkord',
-    autoHideMenuBar: true,
-    show: !config.selftest,
-    backgroundColor: '#0b0d12',
-    webPreferences: {
-      preload: preloadPath,
-      contextIsolation: true,
-      sandbox: true,
-      nodeIntegration: false,
-      autoplayPolicy: 'no-user-gesture-required',
-      backgroundThrottling: false
-    }
-  });
+  const showWindow = (): void => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  };
 
-  window.webContents.on('preload-error', (_event, path, error) => {
-    log('preload failed:', path, error);
-  });
-  mainWindow = window;
-
-  if (config.selftest) {
-    if (!hardwareSink) throw new Error('selftest needs a playback device');
-    const pagePath = join(tmpdir(), 'sharkord-desktop-selftest.html');
-    await writeFile(pagePath, '<!doctype html><meta charset="utf-8"><title>selftest</title><body>selftest</body>');
-    await window.loadFile(pagePath);
-    const result = await runSelftest({
-      config,
-      routing,
-      capture,
-      window,
-      hardwareSink,
-      log
+  const attachWindow = (window: BrowserWindow): void => {
+    window.webContents.on('preload-error', (_event, path, error) => {
+      log('preload failed:', path, error);
     });
-    await shutdown(result.pass ? 0 : 1);
-    return;
+    window.on('close', (event) => {
+      if (shuttingDown) return;
+      log('window closed, staying in the tray');
+      event.preventDefault();
+      window.hide();
+    });
+    window.on('closed', () => {
+      mainWindow = null;
+      // A page can destroy its own window; with a tray around, bring the client back.
+      if (shuttingDown || !tray) return;
+      log('window was destroyed, reopening it');
+      const next = createWindow();
+      void (currentServerUrl ? loadClient(currentServerUrl) : next.loadFile(connectPagePath));
+    });
+  };
+
+  const createWindow = (): BrowserWindow => {
+    const window = new BrowserWindow({
+      width: 1280,
+      height: 840,
+      title: 'Sharkord',
+      autoHideMenuBar: true,
+      show: !config.selftest,
+      backgroundColor: '#0b0d12',
+      webPreferences: {
+        preload: preloadPath,
+        contextIsolation: true,
+        sandbox: true,
+        nodeIntegration: false,
+        autoplayPolicy: 'no-user-gesture-required',
+        backgroundThrottling: false
+      }
+    });
+    mainWindow = window;
+    attachWindow(window);
+    return window;
+  };
+
+  const window = createWindow();
+
+  const connectPagePath = join(__dirname, 'connect.html');
+  const serverConfigPath = join(app.getPath('userData'), 'config.json');
+
+  // The window closes to the tray; the app keeps capturing and can be shown again from there.
+  try {
+    const iconPath = join(__dirname, 'icon.png');
+    tray = new Tray(nativeImage.createFromPath(iconPath));
+    tray.setToolTip('Sharkord Desktop');
+    tray.setContextMenu(
+      Menu.buildFromTemplate([
+        { label: 'Show Sharkord', click: showWindow },
+        {
+          label: 'Change server…',
+          click: () => {
+            showWindow();
+            void mainWindow?.loadFile(connectPagePath);
+          }
+        },
+        { type: 'separator' },
+        {
+          label: 'Quit',
+          click: () => {
+            void shutdown(0);
+          }
+        }
+      ])
+    );
+    tray.on('click', showWindow);
+
+    window.on('close', (event) => {
+      if (shuttingDown) return;
+      log('window closed, staying in the tray');
+      event.preventDefault();
+      window.hide();
+    });
+  } catch (error) {
+    log('no system tray available, closing the window will quit:', error);
+    window.on('closed', () => {
+      void shutdown(0);
+    });
   }
+
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      {
+        label: 'Server',
+        submenu: [
+          {
+            label: 'Change server…',
+            accelerator: 'CmdOrCtrl+Shift+S',
+            click: () => {
+              void mainWindow?.loadFile(connectPagePath);
+            }
+          },
+          { type: 'separator' },
+          { role: 'quit' }
+        ]
+      },
+      { role: 'editMenu' },
+      { role: 'viewMenu' }
+    ])
+  );
 
   const loadClient = async (url: string): Promise<void> => {
     currentServerUrl = url;
     allowedOrigin = new URL(url).origin;
-    await window.loadURL(url);
+    const target = mainWindow;
+    if (!target) return;
+    await target.loadURL(url);
     log('client loaded:', url);
 
     if (config.mode !== 'capture') return;
 
     // The patch is injected asynchronously from the preload; give it a moment before judging.
     for (let attempt = 0; attempt < 10; attempt += 1) {
-      const readiness = (await window.webContents.executeJavaScript(
+      const readiness = (await target.webContents.executeJavaScript(
         `({
           bridge: typeof window.sharkordDesktop,
           patched: !String(navigator.mediaDevices?.getDisplayMedia ?? '').includes('native code'),
@@ -240,26 +279,14 @@ const bootstrap = async (): Promise<void> => {
     }
   });
 
-  Menu.setApplicationMenu(
-    Menu.buildFromTemplate([
-      {
-        label: 'Server',
-        submenu: [
-          {
-            label: 'Change server…',
-            accelerator: 'CmdOrCtrl+Shift+S',
-            click: () => {
-              void window.loadFile(connectPagePath);
-            }
-          },
-          { type: 'separator' },
-          { role: 'quit' }
-        ]
-      },
-      { role: 'editMenu' },
-      { role: 'viewMenu' }
-    ])
-  );
+  if (config.selftest) {
+    const pagePath = join(tmpdir(), 'sharkord-desktop-selftest.html');
+    await writeFile(pagePath, '<!doctype html><meta charset="utf-8"><title>selftest</title><body>selftest</body>');
+    await window.loadFile(pagePath);
+    const result = await runSelftest({ config, tap, window, log });
+    await shutdown(result.pass ? 0 : 1);
+    return;
+  }
 
   const startUrl = config.url ?? readServerUrl(serverConfigPath);
   if (startUrl) {
@@ -268,30 +295,27 @@ const bootstrap = async (): Promise<void> => {
     await window.loadFile(connectPagePath);
     log('no server chosen yet, showing the picker');
   }
-
-  window.on('closed', () => {
-    void shutdown(0);
-  });
 };
 
 if (!app.requestSingleInstanceLock()) {
   app.exit(0);
 } else {
   app.on('second-instance', () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
-    }
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+
+  // With a tray icon around, losing the window must not quit the app.
+  app.on('window-all-closed', () => {
+    if (tray && !shuttingDown) return;
+    void shutdown(0);
   });
 
   app.on('before-quit', (event) => {
     if (shuttingDown) return;
     event.preventDefault();
-    void shutdown(0);
-  });
-
-  app.on('window-all-closed', () => {
     void shutdown(0);
   });
 

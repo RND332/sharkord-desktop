@@ -1,1 +1,0 @@
-alsa_output.usb-Focusrite_Scarlett_Solo_4th_Gen_S1X3F982C00452-00.HiFi__Line1__sink
