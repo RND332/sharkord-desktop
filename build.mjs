@@ -12,6 +12,7 @@ const shared = {
 await rm('dist', { recursive: true, force: true });
 await mkdir('dist', { recursive: true });
 await copyFile('src/connect/connect.html', 'dist/connect.html');
+await copyFile('src/picker/picker.html', 'dist/picker.html');
 if (!existsSync('build/icon.png')) {
   throw new Error('build/icon.png is missing — run `bun run icon`');
 }

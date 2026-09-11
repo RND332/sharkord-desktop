@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from './config';
 import { removeLegacyRouting } from './legacy';
+import { pickDisplaySource, registerPickerIpc } from './picker';
 import { normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
 import { runSelftest } from './selftest';
 import { TapCapture } from './tap';
@@ -42,22 +43,31 @@ const installPermissionHandlers = (origin: () => string): void => {
     return origin() !== '' && requestingOrigin.startsWith(origin()) && allowed[permission] === true;
   });
 
-  // Electron has no default screen picker on Linux (getDisplayMedia rejects with NotSupportedError).
-  // On Wayland this call opens the desktop's own picker — Hyprland's share dialog — and the first
-  // source it returns is what the user selected there.
+  // Electron has no screen picker of its own. On Wayland `getSources` raises the desktop's own
+  // dialog (Hyprland's share picker) and returns what the user chose there; everywhere else —
+  // Windows, macOS, X11 — we have to ask ourselves, in a window like Discord's.
   session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
+    const wayland = process.platform === 'linux' && process.env.XDG_SESSION_TYPE === 'wayland';
+    const wantsSystemPicker = process.env.SHARKORD_PICKER === 'system' || (wayland && process.env.SHARKORD_PICKER !== 'inapp');
+
     try {
       const sources = await desktopCapturer.getSources({
         types: ['screen', 'window'],
-        thumbnailSize: { width: 0, height: 0 }
+        // Thumbnails are only needed for our own picker; the portal dialog draws its own.
+        thumbnailSize: wantsSystemPicker ? { width: 0, height: 0 } : { width: 320, height: 180 },
+        fetchWindowIcons: !wantsSystemPicker
       });
-      const picked = sources[0];
+
+      const picked = wantsSystemPicker
+        ? sources[0] ?? null
+        : await pickDisplaySource(mainWindow, sources);
+
       if (!picked) {
         log('screen share cancelled: no source selected');
         callback({});
         return;
       }
-      log('screen share source:', JSON.stringify({ name: picked.name, of: sources.length }));
+      log('screen share source:', JSON.stringify({ name: picked.name, of: sources.length, picker: wantsSystemPicker ? 'system' : 'in-app' }));
       callback({ video: picked });
     } catch (error) {
       log('screen share failed:', error);
@@ -114,6 +124,7 @@ const bootstrap = async (): Promise<void> => {
   }
 
   installPermissionHandlers(() => allowedOrigin);
+  registerPickerIpc();
   registerIpc();
 
   const preloadPath = join(__dirname, 'preload.js');

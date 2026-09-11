@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+    />
+    <title>Share your screen</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        background: #0b0d12;
+        color: #e5e7eb;
+        font: 14px/1.4 system-ui, -apple-system, 'Segoe UI', sans-serif;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 18px 10px;
+        border-bottom: 1px solid #1f2937;
+      }
+      h1 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 600;
+        flex: 1;
+      }
+      .tabs {
+        display: flex;
+        gap: 4px;
+        background: #111827;
+        padding: 3px;
+        border-radius: 8px;
+      }
+      .tabs button {
+        border: 0;
+        background: transparent;
+        color: #94a3b8;
+        padding: 6px 12px;
+        border-radius: 6px;
+        font: inherit;
+        cursor: pointer;
+      }
+      .tabs button[aria-selected='true'] {
+        background: #1f2937;
+        color: #e5e7eb;
+      }
+      main {
+        flex: 1;
+        overflow: auto;
+        padding: 16px 18px;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 12px;
+        align-content: start;
+      }
+      .card {
+        border: 1px solid #1f2937;
+        border-radius: 10px;
+        background: #111827;
+        padding: 8px;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        text-align: left;
+        color: inherit;
+        font: inherit;
+      }
+      .card:hover {
+        border-color: #334155;
+      }
+      .card[aria-selected='true'] {
+        border-color: #0ea5e9;
+        box-shadow: 0 0 0 1px #0ea5e9;
+      }
+      .thumb {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        object-fit: contain;
+        background: #030712;
+        border-radius: 6px;
+      }
+      .meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-width: 0;
+      }
+      .meta img {
+        width: 16px;
+        height: 16px;
+      }
+      .name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      footer {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 12px 18px;
+        border-top: 1px solid #1f2937;
+      }
+      .hint {
+        flex: 1;
+        color: #64748b;
+      }
+      button.primary,
+      button.ghost {
+        border-radius: 8px;
+        padding: 9px 16px;
+        font: inherit;
+        cursor: pointer;
+      }
+      button.primary {
+        border: 0;
+        background: #0ea5e9;
+        color: #04121b;
+        font-weight: 600;
+      }
+      button.primary:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      button.ghost {
+        border: 1px solid #334155;
+        background: transparent;
+        color: #cbd5e1;
+      }
+      .empty {
+        grid-column: 1 / -1;
+        color: #64748b;
+        padding: 24px 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Share your screen</h1>
+      <div class="tabs" role="tablist">
+        <button role="tab" data-filter="screen" aria-selected="true">Screens</button>
+        <button role="tab" data-filter="window" aria-selected="false">Windows</button>
+        <button role="tab" data-filter="all" aria-selected="false">All</button>
+      </div>
+    </header>
+    <main id="grid"></main>
+    <footer>
+      <span class="hint">Enter shares the highlighted source · Esc cancels</span>
+      <button class="ghost" id="cancel">Cancel</button>
+      <button class="primary" id="share" disabled>Share</button>
+    </footer>
+
+    <script>
+      const grid = document.getElementById('grid');
+      const share = document.getElementById('share');
+      const cancel = document.getElementById('cancel');
+      const tabs = [...document.querySelectorAll('.tabs button')];
+
+      const bridge = window.sharkordDesktop;
+      let sources = [];
+      let filter = 'screen';
+      let selectedId = null;
+
+      const typeOf = (id) => (id.startsWith('screen') ? 'screen' : 'window');
+      const visible = () => sources.filter((s) => filter === 'all' || typeOf(s.id) === filter);
+
+      const render = () => {
+        const list = visible();
+        grid.replaceChildren();
+
+        if (list.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'empty';
+          empty.textContent = 'Nothing to share here.';
+          grid.append(empty);
+        }
+
+        for (const source of list) {
+          const card = document.createElement('button');
+          card.className = 'card';
+          card.type = 'button';
+          card.setAttribute('aria-selected', String(source.id === selectedId));
+
+          const thumb = document.createElement('img');
+          thumb.className = 'thumb';
+          thumb.src = source.thumbnail || '';
+          thumb.alt = '';
+          card.append(thumb);
+
+          const meta = document.createElement('div');
+          meta.className = 'meta';
+          if (source.icon) {
+            const icon = document.createElement('img');
+            icon.src = source.icon;
+            icon.alt = '';
+            meta.append(icon);
+          }
+          const name = document.createElement('span');
+          name.className = 'name';
+          name.textContent = source.name || 'Untitled';
+          meta.append(name);
+          card.append(meta);
+
+          card.addEventListener('click', () => {
+            selectedId = source.id;
+            render();
+          });
+          card.addEventListener('dblclick', () => finish(source.id));
+          grid.append(card);
+        }
+
+        share.disabled = selectedId === null;
+      };
+
+      const setFilter = (next) => {
+        filter = next;
+        for (const tab of tabs) tab.setAttribute('aria-selected', String(tab.dataset.filter === next));
+        // highlight the first entry of the tab so Enter always does something sensible
+        selectedId = visible()[0]?.id ?? null;
+        render();
+      };
+
+      let finished = false;
+      const finish = (id) => {
+        if (finished) return;
+        finished = true;
+        void bridge.pickerChoose(id);
+      };
+
+      for (const tab of tabs) tab.addEventListener('click', () => setFilter(tab.dataset.filter));
+      share.addEventListener('click', () => finish(selectedId));
+      cancel.addEventListener('click', () => finish(null));
+      window.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') finish(null);
+        if (event.key === 'Enter') finish(selectedId);
+      });
+
+      (async () => {
+        sources = (await bridge.pickerSources()) ?? [];
+        setFilter(sources.some((s) => typeOf(s.id) === 'screen') ? 'screen' : 'all');
+      })();
+    </script>
+  </body>
+</html>

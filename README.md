@@ -108,16 +108,25 @@ disappears), the PCM framing (byte-exact carry, per-channel RMS, Goertzel select
 behaviour (passthrough, merge, fallback, backpressure, release), the server configuration (URL
 normalisation, hostile configs, storage round-trip) and the platform mode.
 
-Electron on Linux has no default screen picker — `getDisplayMedia` rejects with `NotSupportedError`
-unless the app installs `setDisplayMediaRequestHandler`. This app installs one that calls
-`desktopCapturer.getSources()`, which is what raises the desktop's own dialog (Hyprland's
-`hyprland-preview-share-picker`) and returns the source the user selected there. Electron's own
-`useSystemPicker` option is macOS-only and is not used.
+Electron has no screen picker of its own — `getDisplayMedia` rejects with `NotSupportedError` unless
+the app installs `setDisplayMediaRequestHandler`, and that handler must name the source. So the app
+asks the user:
+
+- **Wayland** — `desktopCapturer.getSources()` raises the desktop's own dialog (Hyprland's
+  `hyprland-preview-share-picker`, the portal on other compositors) and the source the user picked
+  there is used. Electron's `useSystemPicker` option is macOS-only and unused.
+- **Windows, macOS, X11** — those have no such dialog, so the app shows its own picker window:
+  thumbnails of every screen and window, Screens/Windows/All tabs, first entry pre-selected,
+  Enter shares, Esc cancels. Until 0.4.0 this case silently took the first source, which on Windows
+  was usually the Sharkord window itself — that is fixed by the picker.
+
+`SHARKORD_PICKER=inapp|system` forces either picker (useful when a compositor's portal misbehaves).
 
 ## Known limits
 
-- The audio exclusion is Linux/PipeWire only; the whole point is routing that Windows/macOS do
-  differently.
+- The audio exclusion is Linux/PipeWire only. Windows and macOS get video through the picker and no
+  injected audio: Electron can loop the whole system output back on Windows, but that would also send
+  the voice channel you hear to the viewers, which is the thing this app exists to avoid.
 - Applications that bypass the PipeWire graph (raw ALSA exclusive mode) are not captured.
 - Per-application volume and mute are honoured (the tap is taken after them); a sink's own volume or
   mute is not, because the tap never passes through the device.

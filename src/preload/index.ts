@@ -9,6 +9,9 @@ const bridge = {
   currentServer: (): Promise<string | null> => ipcRenderer.invoke('server:current'),
   submitServer: (url: string): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('server:submit', url),
+  /** Used by the built-in picker window. */
+  pickerSources: (): Promise<unknown> => ipcRenderer.invoke('picker:sources'),
+  pickerChoose: (id: string | null): Promise<boolean> => ipcRenderer.invoke('picker:choose', id),
   acquireCapture: async (): Promise<void> => {
     if (holders === 0) await ipcRenderer.invoke('capture:acquire');
     holders += 1;
