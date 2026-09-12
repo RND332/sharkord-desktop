@@ -57,10 +57,13 @@ type WriteRecord = {
   data: Float32Array;
 };
 
-const makeAudioData = (writes: WriteRecord[]) =>
+const makeAudioData = (writes: WriteRecord[], onClose: () => void) =>
   class {
     constructor(init: WriteRecord) {
       writes.push(init);
+    }
+    close(): void {
+      onClose();
     }
   };
 
@@ -69,11 +72,17 @@ type SetupOptions = {
   captureSource?: string;
   probe?: (track: MediaStreamTrack) => Promise<boolean | null>;
   forceSystemAudio?: boolean;
+  platform?: string;
+  generators?: boolean;
+  failWriter?: boolean;
+  failGenerator?: boolean;
 };
 
 const setup = (options: SetupOptions = {}) => {
   const writes: WriteRecord[] = [];
   const pcmCallbacks: Array<(chunk: Uint8Array) => void> = [];
+  const captureEndedCallbacks: Array<() => void> = [];
+  let closedData = 0;
   const videoTrack = makeTrack('video');
   const audioTrack = makeTrack('audio');
   const originalStream = new FakeMediaStream([videoTrack, audioTrack]) as unknown as MediaStream;
@@ -89,11 +98,15 @@ const setup = (options: SetupOptions = {}) => {
     readyState = 'live';
     writable: { getWriter(): { write(d: unknown): Promise<void> } };
     constructor() {
+      if (options.failGenerator) throw new Error('generator allocation failed');
       (this as unknown as { kind: string }).kind = 'audio';
       this.writable = {
-        getWriter: () => ({
-          write: () => (options.resolveWrite ? options.resolveWrite() : Promise.resolve())
-        })
+        getWriter: () => {
+          if (options.failWriter) throw new Error('writer unavailable');
+          return {
+            write: () => (options.resolveWrite ? options.resolveWrite() : Promise.resolve())
+          };
+        }
       };
       generatedTracks.push(this as unknown as (typeof generatedTracks)[number]);
     }
@@ -108,11 +121,17 @@ const setup = (options: SetupOptions = {}) => {
   const env: PatchEnvironment = {
     mediaDevices: { getDisplayMedia } as unknown as PatchEnvironment['mediaDevices'],
     MediaStream: FakeMediaStream as unknown as PatchEnvironment['MediaStream'],
-    MediaStreamTrackGenerator: FakeGenerator as unknown as PatchEnvironment['MediaStreamTrackGenerator'],
-    AudioData: makeAudioData(writes) as unknown as PatchEnvironment['AudioData'],
+    MediaStreamTrackGenerator: (options.generators === false
+      ? undefined
+      : FakeGenerator) as unknown as PatchEnvironment['MediaStreamTrackGenerator'],
+    AudioData: (options.generators === false
+      ? undefined
+      : makeAudioData(writes, () => {
+          closedData += 1;
+        })) as unknown as PatchEnvironment['AudioData'],
     probeOwnAudio: probe,
     bridge: {
-      platform: 'win32',
+      platform: options.platform ?? 'win32',
       captureSource: options.captureSource ?? 'windows',
       forceSystemAudio: options.forceSystemAudio,
       reportCaptureMode,
@@ -123,6 +142,13 @@ const setup = (options: SetupOptions = {}) => {
         return () => {
           const index = pcmCallbacks.indexOf(cb);
           if (index >= 0) pcmCallbacks.splice(index, 1);
+        };
+      },
+      onCaptureEnded: (cb) => {
+        captureEndedCallbacks.push(cb);
+        return () => {
+          const index = captureEndedCallbacks.indexOf(cb);
+          if (index >= 0) captureEndedCallbacks.splice(index, 1);
         };
       }
     },
@@ -150,7 +176,10 @@ const setup = (options: SetupOptions = {}) => {
     generatedTracks,
     pushPcm: (chunk: Uint8Array) => pcmCallbacks.forEach((cb) => cb(chunk)),
     tick: () => intervalCallback?.(),
-    pcmHandlerCount: () => pcmCallbacks.length
+    pcmHandlerCount: () => pcmCallbacks.length,
+    emitCaptureEnded: () => captureEndedCallbacks.slice().forEach((cb) => cb()),
+    endedHandlerCount: () => captureEndedCallbacks.length,
+    audioDataClosed: () => closedData
   };
 };
 
@@ -273,10 +302,142 @@ describe('display-media patch: our own capture', () => {
 
     expect(env.generatedTracks[0]!.readyState).toBe('ended');
   });
+
+  it('never sends browser loopback when Windows isolation fails', async () => {
+    const env = setup({ probe: async () => false, forceSystemAudio: true });
+    env.acquireCapture.mockRejectedValueOnce(new Error('native capture unavailable'));
+
+    const stream = await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+    expect(env.audioTrack.stopped).toBe(true);
+    expect(stream.getAudioTracks()).toEqual([]);
+    expect(stream.getVideoTracks()).toEqual([env.videoTrack]);
+    expect(env.generatedTracks.every((track) => track.readyState === 'ended')).toBe(true);
+  });
+
+  it('never sends browser loopback when the Windows helper is missing', async () => {
+    const env = setup({ captureSource: 'none', probe: async () => false, forceSystemAudio: true });
+
+    const stream = await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+    expect(env.audioTrack.stopped).toBe(true);
+    expect(stream.getAudioTracks()).toEqual([]);
+    expect(stream.getVideoTracks()).toEqual([env.videoTrack]);
+  });
+});
+
+describe('display-media patch: Windows audio ownership', () => {
+  it('refuses a second audio share while one is still open', async () => {
+    const env = setup();
+    const first = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
+    expect(first.getAudioTracks()).toHaveLength(1);
+
+    await expect(env.mediaDevices.getDisplayMedia({ video: true, audio: true })).rejects.toThrow();
+    expect(env.getDisplayMedia).toHaveBeenCalledTimes(1);
+    expect(env.acquireCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it('hands the next share the capture as soon as the injected track stops', async () => {
+    const env = setup();
+    await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    env.generatedTracks[0]!.stop();
+
+    expect(env.releaseCapture).toHaveBeenCalledTimes(1);
+    expect(env.pcmHandlerCount()).toBe(0);
+    await flush();
+
+    const next = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
+    expect(next.getAudioTracks()).toHaveLength(1);
+    expect(env.acquireCapture).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits for the previous release before opening the next audio picker', async () => {
+    const env = setup();
+    await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    env.generatedTracks[0]!.stop();
+
+    // The release is still in flight: a request issued now must not start a picker before it lands.
+    const next = env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    expect(env.getDisplayMedia).toHaveBeenCalledTimes(1);
+    await flush();
+    expect(env.getDisplayMedia).toHaveBeenCalledTimes(2);
+    expect((await next).getAudioTracks()).toHaveLength(1);
+  });
+
+  it('releases the capture when the shared video is stopped without an ended event', async () => {
+    const env = setup();
+    await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+    env.videoTrack.stop();
+    env.tick();
+    await flush();
+
+    expect(env.generatedTracks[0]!.readyState).toBe('ended');
+    expect(env.releaseCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it('tears the injected audio down when the native capture ends on its own', async () => {
+    const env = setup();
+    await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    env.emitCaptureEnded();
+    await flush();
+
+    expect(env.generatedTracks[0]!.readyState).toBe('ended');
+    expect(env.releaseCapture).toHaveBeenCalledTimes(1);
+    expect(env.endedHandlerCount()).toBe(0);
+
+    const next = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
+    expect(next.getAudioTracks()).toHaveLength(1);
+  });
+
+  it('closes each AudioData once the writer took it', async () => {
+    const env = setup();
+    await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    env.pushPcm(interleaved(480, 0.25));
+    await flush();
+
+    expect(env.writes).toHaveLength(1);
+    expect(env.audioDataClosed()).toBe(1);
+  });
+
+  it('gives the capture back when setting up the injected track fails', async () => {
+    const env = setup({ failWriter: true });
+    const stream = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
+
+    expect(env.acquireCapture).toHaveBeenCalledTimes(1);
+    expect(env.releaseCapture).toHaveBeenCalledTimes(1);
+    expect(env.pcmHandlerCount()).toBe(0);
+    expect(env.audioTrack.stopped).toBe(true);
+    expect(stream.getAudioTracks()).toEqual([]);
+    expect(stream.getVideoTracks()).toEqual([env.videoTrack]);
+  });
+
+  it('lets the next share through after a failed capture, and never probes', async () => {
+    const env = setup({ probe: async () => false, forceSystemAudio: true });
+    env.acquireCapture.mockRejectedValueOnce(new Error('helper is missing'));
+
+    await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    expect(env.probe).not.toHaveBeenCalled();
+
+    const next = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
+    expect(next.getAudioTracks()).toHaveLength(1);
+    expect(env.acquireCapture).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps failing closed when the capture constructors are missing', async () => {
+    const env = setup({ generators: false, forceSystemAudio: true, probe: async () => false });
+    const stream = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
+
+    expect(env.acquireCapture).not.toHaveBeenCalled();
+    expect(env.probe).not.toHaveBeenCalled();
+    expect(env.audioTrack.stopped).toBe(true);
+    expect(stream.getAudioTracks()).toEqual([]);
+    expect(stream.getVideoTracks()).toEqual([env.videoTrack]);
+  });
 });
 
 describe('display-media patch: no capture of our own', () => {
-  const noCapture = { captureSource: 'none' as const };
+  const noCapture = { captureSource: 'none' as const, platform: 'darwin' as const };
 
   it('keeps system audio only when the probe cleared it', async () => {
     const env = setup({ ...noCapture, probe: async () => false });
@@ -342,7 +503,7 @@ describe('display-media patch fallbacks', () => {
   });
 
   it('falls back to the probe when the capture cannot start', async () => {
-    const env = setup({ probe: async () => false });
+    const env = setup({ platform: 'linux', captureSource: 'pipewire', probe: async () => false });
     env.acquireCapture.mockRejectedValueOnce(new Error('helper is missing'));
 
     const stream = await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
@@ -357,5 +518,24 @@ describe('display-media patch fallbacks', () => {
     expect(
       (env.mediaDevices.getDisplayMedia as unknown as { __sharkordDesktop?: boolean }).__sharkordDesktop
     ).toBe(true);
+  });
+});
+
+describe('Windows capture setup failures', () => {
+  it('releases an acquired helper when the generator constructor throws', async () => {
+    const env = setup({ failGenerator: true });
+    const stream = await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+    expect(stream.getAudioTracks()).toEqual([]);
+    expect(env.releaseCapture).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not return a live track when capture ends during acquisition', async () => {
+    const env = setup();
+    env.acquireCapture.mockImplementationOnce(async () => env.emitCaptureEnded());
+    const stream = await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+    expect(stream.getAudioTracks()).toEqual([]);
+    expect(env.releaseCapture).toHaveBeenCalledTimes(1);
   });
 });

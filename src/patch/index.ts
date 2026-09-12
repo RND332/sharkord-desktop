@@ -14,7 +14,9 @@ export type AudioTrackLike = {
   addEventListener(type: string, cb: () => void): void;
 };
 
-export type AudioDataLike = unknown;
+export type AudioDataLike = { close?(): void };
+
+export type IntervalHandle = number | NodeJS.Timeout;
 
 export type EchoTest = 'clean' | 'captured' | 'unknown';
 
@@ -29,10 +31,10 @@ export type PatchEnvironment = {
     getDisplayMedia(constraints?: MediaStreamConstraints): Promise<MediaStream>;
   };
   MediaStream: new (tracks?: MediaStreamTrack[]) => MediaStream;
-  MediaStreamTrackGenerator: new (init: { kind: 'audio' }) => AudioTrackLike & {
+  MediaStreamTrackGenerator?: new (init: { kind: 'audio' }) => AudioTrackLike & {
     writable: { getWriter(): { write(data: AudioDataLike): Promise<void> } };
   };
-  AudioData: new (init: {
+  AudioData?: new (init: {
     format: 'f32';
     sampleRate: number;
     numberOfFrames: number;
@@ -56,6 +58,7 @@ export type PatchEnvironment = {
     acquireCapture(): Promise<void>;
     releaseCapture(): Promise<void>;
     onPcm(cb: (chunk: Uint8Array) => void): () => void;
+    onCaptureEnded?(cb: () => void): () => void;
   };
   /** Measures whether the capture can hear this app; overridable for tests. */
   probeOwnAudio?: (track: MediaStreamTrack) => Promise<boolean | null>;
@@ -64,17 +67,6 @@ export type PatchEnvironment = {
   clearIntervalFn?: typeof clearInterval;
 };
 
-/**
- * Replaces `getDisplayMedia` so a screen share carries PC audio without ever carrying the voice
- * channel back to the people in it:
- *
- * 1. our own capture — PipeWire on Linux, a WASAPI process loopback in exclude mode on Windows —
- *    is injected as an audio track and is echo-free by construction;
- * 2. otherwise the browser's own system-audio capture is measured: a quiet tone is played through
- *    the device the app's voice plays on, and if the capture hears it, the audio is dropped;
- * 3. anything undecidable is treated as echoing, so a share stays video-only rather than sending
- *    the channel back to its own participants.
- */
 export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
   const log = env.log ?? ((...args: unknown[]) => console.warn('[sharkord-desktop]', ...args));
   const setIntervalFn = env.setIntervalFn ?? setInterval;
@@ -82,97 +74,166 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
   const mediaDevices = env.mediaDevices;
   const originalGetDisplayMedia = mediaDevices.getDisplayMedia.bind(mediaDevices);
   const probe = env.probeOwnAudio ?? ((track: MediaStreamTrack) => probeOwnAudio(track, { log }));
+  const windows = env.bridge.platform === 'win32';
+  let windowsShareOpen = false;
+  let windowsShareRelease: Promise<void> = Promise.resolve();
 
-  const createCapturedTrack = async (): Promise<{ track: AudioTrackLike; release(): void }> => {
-    const generator = new env.MediaStreamTrackGenerator({ kind: 'audio' });
-    await env.bridge.acquireCapture();
-    const writer = generator.writable.getWriter();
-
-    let carry: Uint8Array = new Uint8Array(0);
-    let timestampUs = 0;
-    let pending = 0;
-    let released = false;
-
-    const unsubscribe = env.bridge.onPcm((chunk) => {
-      const framed = frameInterleavedF32(carry, chunk, PCM_CHANNELS);
-      carry = framed.carry;
-      for (const frame of framed.frames) {
-        const frames = frame.length / PCM_CHANNELS;
-        const durationUs = Math.round((frames / PCM_SAMPLE_RATE) * 1e6);
-        if (pending < MAX_PENDING_FRAMES) {
-          pending += 1;
-          writer
-            .write(
-              new env.AudioData({
-                format: 'f32',
-                sampleRate: PCM_SAMPLE_RATE,
-                numberOfFrames: frames,
-                numberOfChannels: PCM_CHANNELS,
-                timestamp: timestampUs,
-                data: frame
-              })
-            )
-            .catch(() => {})
-            .finally(() => {
-              pending -= 1;
-            });
-        }
-        // Advance even when dropping, so audio stays in step with the video clock.
-        timestampUs += durationUs;
-      }
+  const releaseNativeCapture = (): Promise<void> => {
+    const released = env.bridge.releaseCapture().catch(() => {});
+    if (!windows) return released;
+    windowsShareRelease = released.then(() => {
+      windowsShareOpen = false;
     });
+    return windowsShareRelease;
+  };
+
+  const createCapturedTrack = async (
+    video: MediaStreamTrack | undefined
+  ): Promise<{ track: AudioTrackLike; release(): void }> => {
+    const Generator = env.MediaStreamTrackGenerator;
+    const AudioDataCtor = env.AudioData;
+    if (!Generator || !AudioDataCtor) throw new Error('MediaStreamTrackGenerator/AudioData unavailable');
+
+    let released = false;
+    let acquired = false;
+    let ended = false;
+    let timer: IntervalHandle | null = null;
+    let stopTrack = (): void => {};
+    let unsubscribePcm = (): void => {};
+    let unsubscribeEnded = (): void => {};
 
     const release = (): void => {
       if (released) return;
       released = true;
-      clearIntervalFn(timer);
-      unsubscribe();
-      void env.bridge.releaseCapture().catch(() => {});
+      if (timer !== null) clearIntervalFn(timer);
+      unsubscribePcm();
+      unsubscribeEnded();
+      stopTrack();
+      void releaseNativeCapture();
     };
 
-    const timer = setIntervalFn(() => {
-      if (generator.readyState === 'ended') release();
-    }, 500);
+    unsubscribeEnded =
+      env.bridge.onCaptureEnded?.(() => {
+        ended = true;
+        if (acquired) release();
+      }) ?? (() => {});
 
-    return { track: generator, release };
+    try {
+      await env.bridge.acquireCapture();
+      acquired = true;
+      if (ended) throw new Error('capture ended while it was being acquired');
+
+      const generator = new Generator({ kind: 'audio' });
+      stopTrack = generator.stop.bind(generator);
+      // stop() fires no `ended` event, so release from here too.
+      generator.stop = (): void => {
+        stopTrack();
+        release();
+      };
+
+      let carry: Uint8Array = new Uint8Array(0);
+      let timestampUs = 0;
+      let pending = 0;
+      const writer = generator.writable.getWriter();
+      unsubscribePcm = env.bridge.onPcm((chunk) => {
+        const framed = frameInterleavedF32(carry, chunk, PCM_CHANNELS);
+        carry = framed.carry;
+        for (const frame of framed.frames) {
+          const frames = frame.length / PCM_CHANNELS;
+          const durationUs = Math.round((frames / PCM_SAMPLE_RATE) * 1e6);
+          if (pending < MAX_PENDING_FRAMES) {
+            pending += 1;
+            const data = new AudioDataCtor({
+              format: 'f32',
+              sampleRate: PCM_SAMPLE_RATE,
+              numberOfFrames: frames,
+              numberOfChannels: PCM_CHANNELS,
+              timestamp: timestampUs,
+              data: frame
+            });
+            writer
+              .write(data)
+              .catch(() => release())
+              .finally(() => {
+                pending -= 1;
+                data.close?.();
+              });
+          }
+          // Advance even when dropping, so audio stays in step with the video clock.
+          timestampUs += durationUs;
+        }
+      });
+
+      timer = setIntervalFn(() => {
+        if (generator.readyState === 'ended' || video?.readyState === 'ended') release();
+      }, 500);
+
+      return { track: generator, release };
+    } catch (error) {
+      release();
+      throw error;
+    }
   };
 
   /** Adds our own captured audio in place of whatever the browser captured; null when unavailable. */
   const withCapturedAudio = async (stream: MediaStream): Promise<MediaStream | null> => {
     if (env.bridge.captureSource === 'none') return null;
 
+    const video = stream.getVideoTracks()[0];
     let injected: { track: AudioTrackLike; release(): void };
     try {
-      injected = await createCapturedTrack();
+      injected = await createCapturedTrack(video);
     } catch (error) {
-      log('no system audio capture available, falling back to the browser\'s own', error);
+      log('no system audio capture available', error);
       return null;
     }
 
-    // Whatever the browser handed us is not part of the share: this capture is the whole story.
     for (const track of stream.getAudioTracks()) track.stop();
-
     void env.bridge.reportCaptureMode?.({ mode: 'captured-pcm' });
-    const merged = new env.MediaStream([
-      ...stream.getVideoTracks(),
-      injected.track as unknown as MediaStreamTrack
-    ]);
-
-    const videoTrack = stream.getVideoTracks()[0];
-    if (videoTrack && typeof videoTrack.addEventListener === 'function') {
-      videoTrack.addEventListener('ended', () => {
-        injected.track.stop();
-      });
+    try {
+      const merged = new env.MediaStream([
+        ...stream.getVideoTracks(),
+        injected.track as unknown as MediaStreamTrack
+      ]);
+      if (video && typeof video.addEventListener === 'function') {
+        video.addEventListener('ended', () => injected.track.stop());
+      }
+      return merged;
+    } catch (error) {
+      injected.release();
+      log('could not build the shared stream', error);
+      return null;
     }
-    return merged;
   };
 
   mediaDevices.getDisplayMedia = async (
     constraints: MediaStreamConstraints = {}
   ): Promise<MediaStream> => {
     const wantsAudio = Boolean(constraints.audio);
-    const stream = await originalGetDisplayMedia(wantsAudio ? { ...constraints, audio: true } : constraints);
-    if (!wantsAudio) return stream;
+    if (!wantsAudio) return originalGetDisplayMedia(constraints);
+
+    if (windows) {
+      await windowsShareRelease;
+      if (windowsShareOpen) throw new Error('a Windows audio share is already open');
+      windowsShareOpen = true;
+    }
+
+    let stream: MediaStream;
+    try {
+      stream = await originalGetDisplayMedia({ ...constraints, audio: true });
+    } catch (error) {
+      windowsShareOpen = false;
+      throw error;
+    }
+
+    if (windows) {
+      const withOurs = await withCapturedAudio(stream);
+      if (withOurs) return withOurs;
+      for (const track of stream.getAudioTracks()) track.stop();
+      void env.bridge.reportCaptureMode?.({ mode: 'system-audio-unavailable' });
+      windowsShareOpen = false;
+      return new env.MediaStream(stream.getVideoTracks());
+    }
 
     const withOurs = await withCapturedAudio(stream);
     if (withOurs) return withOurs;

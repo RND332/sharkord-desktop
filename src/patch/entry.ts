@@ -48,17 +48,22 @@ if (!bridge) {
   console.warn('[sharkord-desktop] preload bridge missing, screen-share audio not patched');
 } else if (!navigator.mediaDevices) {
   console.warn('[sharkord-desktop] mediaDevices unavailable on this page, not patching');
-} else if (typeof Generator !== 'function' || typeof AudioDataCtor !== 'function') {
-  console.warn(
-    '[sharkord-desktop] MediaStreamTrackGenerator/AudioData unavailable, screen-share audio not patched'
-  );
 } else {
+  if (typeof Generator !== 'function' || typeof AudioDataCtor !== 'function') {
+    console.warn(
+      '[sharkord-desktop] MediaStreamTrackGenerator/AudioData unavailable; no audio from our own capture'
+    );
+  }
   installGetDisplayMediaPatch({
     mediaDevices: navigator.mediaDevices,
     MediaStream,
-    // Both are Chromium-only constructors absent from the DOM lib; shape checked above.
-    MediaStreamTrackGenerator: Generator as unknown as PatchEnvironment['MediaStreamTrackGenerator'],
-    AudioData: AudioDataCtor as unknown as PatchEnvironment['AudioData'],
+    // Both are Chromium-only constructors absent from the DOM lib; the patch fails closed without them.
+    MediaStreamTrackGenerator:
+      typeof Generator === 'function'
+        ? (Generator as unknown as PatchEnvironment['MediaStreamTrackGenerator'])
+        : undefined,
+    AudioData:
+      typeof AudioDataCtor === 'function' ? (AudioDataCtor as unknown as PatchEnvironment['AudioData']) : undefined,
     bridge
   });
   showVersionBadge(bridge);
