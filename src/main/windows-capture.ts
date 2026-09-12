@@ -45,6 +45,8 @@ export class WindowsCapture {
   private child: ChildProcessLike | null = null;
   private stopping = true;
   private restarts = 0;
+  private sawAudio = false;
+  private waiter: { resolve(): void; reject(error: Error): void; timer: NodeJS.Timeout } | null = null;
   private timer: NodeJS.Timeout | null = null;
   private readonly dataCallbacks = new Set<(chunk: Buffer) => void>();
   private readonly spawner: Spawner;
@@ -63,7 +65,38 @@ export class WindowsCapture {
     if (this.child) return;
     this.stopping = false;
     this.restarts = 0;
+    this.sawAudio = false;
     this.spawnChild();
+  }
+
+  /**
+   * Resolves once the helper is really producing audio, rejects when it died first — which is how a
+   * Windows build below 20348 answers, since exclude mode simply is not there.
+   */
+  waitUntilCapturing(timeoutMs = 2000): Promise<void> {
+    if (this.sawAudio) return Promise.resolve();
+    if (!this.child) return Promise.reject(new Error('the audio helper is not running'));
+
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.waiter?.timer === timer) this.waiter = null;
+        reject(new Error('the audio helper produced no audio'));
+      }, timeoutMs);
+
+      this.waiter = {
+        resolve: () => {
+          clearTimeout(timer);
+          if (this.waiter?.timer === timer) this.waiter = null;
+          resolve();
+        },
+        reject: (error: Error) => {
+          clearTimeout(timer);
+          if (this.waiter?.timer === timer) this.waiter = null;
+          reject(error);
+        },
+        timer
+      };
+    });
   }
 
   stop(): void {
@@ -102,6 +135,8 @@ export class WindowsCapture {
 
     this.child = child;
     child.stdout?.on('data', (chunk) => {
+      this.sawAudio = true;
+      this.waiter?.resolve();
       for (const callback of this.dataCallbacks) callback(chunk);
     });
     child.stderr?.on('data', (chunk) => this.log('win-audio-capture:', chunk.toString().trim()));
@@ -116,12 +151,14 @@ export class WindowsCapture {
 
     child.on('error', (error: Error) => {
       if (!settle()) return;
+      this.waiter?.reject(error);
       this.log(`cannot run the audio helper: ${error.message}`);
       this.stopping = true; // nothing to retry
     });
 
     child.on('exit', (code) => {
       if (!settle()) return;
+      this.waiter?.reject(new Error(`the audio helper exited with code ${code ?? 'null'}`));
       if (this.stopping) return;
 
       const backoff = this.options.backoffMs ?? [250, 500, 1000, 2000, 4000];

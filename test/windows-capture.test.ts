@@ -108,4 +108,39 @@ describe('WindowsCapture', () => {
     expect(logs.some((line) => line.includes('ENOENT'))).toBe(true);
     expect(capture.running).toBe(false);
   });
+
+  it('reports capture readiness only once audio really flows', async () => {
+    const { capture, children } = setup();
+    capture.start();
+
+    const ready = capture.waitUntilCapturing(500);
+    children[0]!.stdout.emit('data', Buffer.from([0, 0, 0, 0]));
+
+    await expect(ready).resolves.toBeUndefined();
+    await expect(capture.waitUntilCapturing(500)).resolves.toBeUndefined();
+  });
+
+  it('fails readiness when the OS refused exclude mode, so the share can fall back', async () => {
+    const { capture, children } = setup({ backoffMs: [10_000] });
+    capture.start();
+
+    const ready = capture.waitUntilCapturing(500);
+    children[0]!.emit('exit', 2); // what the helper does when activation fails
+
+    await expect(ready).rejects.toThrow(/exited with code 2/);
+    capture.stop();
+  });
+
+  it('fails readiness when the helper never produces anything', async () => {
+    vi.useFakeTimers();
+    const { capture } = setup();
+    capture.start();
+
+    const ready = capture.waitUntilCapturing(2000);
+    const assertion = expect(ready).rejects.toThrow(/produced no audio/);
+    await vi.advanceTimersByTimeAsync(2000);
+
+    await assertion;
+    capture.stop();
+  });
 });

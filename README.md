@@ -192,6 +192,8 @@ asks the user:
 | `src/main/server-config.ts` | server URL validation + storage |
 | `src/connect/connect.html` | first-run / change-server picker |
 | `src/main/tap.ts` | recording node + per-application link management |
+| `src/main/windows-capture.ts` | runs `win-audio-capture.exe` and streams its PCM |
+| `native/windows/win-audio-capture.cpp` | WASAPI process loopback in exclude mode (build 20348+) |
 | `src/main/legacy.ts` | cleans up the virtual sink older versions created |
 | `src/main/logger.ts` | console + `main.log` for bug reports |
 | `src/main/updater.ts` | automatic updates from the release page |
@@ -199,4 +201,5 @@ asks the user:
 | `src/main/selftest.ts` | tone-exclusion proof |
 | `src/preload/index.ts` | capture bridge |
 | `src/patch/` | main-world `getDisplayMedia` patch |
+| `src/patch/echo-test.ts` | 16 kHz probe that decides whether a capture can hear us |
 | `docs/superpowers/` | design spec + implementation plan |

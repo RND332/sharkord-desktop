@@ -136,10 +136,13 @@ const installPermissionHandlers = (origin: () => string): void => {
 
 const registerIpc = (): void => {
   ipcMain.handle('patch:source', async () => readFile(join(__dirname, 'patch.js'), 'utf8'));
-  ipcMain.handle('capture:acquire', () => {
+  ipcMain.handle('capture:acquire', async () => {
     // Rejecting matters: the page treats a resolved call as "audio is coming".
     if (!captureSource) throw new Error('this platform has no capture of its own');
     captureSource.start();
+    // A helper that dies at startup (no exclude mode on this Windows build) must not look like one
+    // that works, or the share would carry silence instead of falling back to system audio.
+    if (windowsCapture) await windowsCapture.waitUntilCapturing();
   });
   ipcMain.handle('capture:release', () => {
     captureSource?.stop();
