@@ -138,11 +138,13 @@ asks the user:
 
 ## Known limits
 
-- On **Windows** the exclusion works through Chromium's `restrictOwnAudio`, which it implements with
-  the OS process-tree loopback exclusion — available from **Windows 11 (build 22000)** only. On
-  Windows 10 the constraint is silently ignored, so the share carries the voice channel you hear as
-  well; the app logs and warns about exactly this, and `SHARKORD_WINDOWS_AUDIO=off` gives video-only
-  shares. Electron only started honouring the constraint in `setDisplayMediaRequestHandler` in v44.
+- On **Windows** the app captures system audio itself through Chromium's `loopbackWithoutChrome`
+  device: a WASAPI **process loopback in exclude mode** for this app's process tree, which Windows has
+  supported since 10 2004. (Chromium's own `restrictOwnAudio` constraint does the same but is gated to
+  Windows 11, and Electron only honoured it inside `setDisplayMediaRequestHandler` from v44 — so the
+  device is requested directly and the constraint is only the fallback.) When neither is available the
+  app logs and warns that viewers will also hear the voice channel; `SHARKORD_WINDOWS_AUDIO=off` gives
+  video-only shares.
 - macOS gets video through the picker, no system audio.
 - Another instance of this app on the same machine is a separate application: its playback is captured
   by design, which is why the self test notes it and skips the tone-based leak check while it runs.

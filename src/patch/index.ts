@@ -18,6 +18,7 @@ export type AudioDataLike = unknown;
 export type PatchEnvironment = {
   mediaDevices: {
     getDisplayMedia(constraints?: MediaStreamConstraints): Promise<MediaStream>;
+    getUserMedia?(constraints?: MediaStreamConstraints): Promise<MediaStream>;
   };
   MediaStream: new (tracks?: MediaStreamTrack[]) => MediaStream;
   MediaStreamTrackGenerator: new (init: { kind: 'audio' }) => AudioTrackLike & {
@@ -114,21 +115,56 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
     return { track: generator, release };
   };
 
-  // Windows and macOS hand the capture to Chromium; the only thing left to fix is asking it to
-  // leave our own playback out of the system audio, so viewers do not hear themselves.
+  // Windows and macOS hand the capture to Chromium.
   const usesPlatformCapture = env.bridge.platform === 'win32' || env.bridge.platform === 'darwin';
   if (usesPlatformCapture) {
+    /**
+     * Windows can hand us system audio without this app: the `loopbackWithoutChrome` device makes
+     * Chromium open a WASAPI process loopback in EXCLUDE mode for its own process tree, which the OS
+     * has supported since Windows 10 2004. Chromium's `restrictOwnAudio` constraint would do the same
+     * but is gated to Windows 11, so we ask for the device directly and only fall back to the
+     * constraint when it is unavailable.
+     */
+    const captureSystemAudioExcludingSelf = async (): Promise<MediaStreamTrack | null> => {
+      if (env.bridge.platform !== 'win32' || !env.mediaDevices.getUserMedia) return null;
+      try {
+        const stream = await env.mediaDevices.getUserMedia({
+          audio: {
+            deviceId: { exact: 'loopbackWithoutChrome' },
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            channelCount: 2
+          } as MediaTrackConstraints
+        });
+        return stream.getAudioTracks()[0] ?? null;
+      } catch {
+        return null;
+      }
+    };
+
     mediaDevices.getDisplayMedia = async (
       constraints: MediaStreamConstraints = {}
     ): Promise<MediaStream> => {
       if (!constraints.audio) return originalGetDisplayMedia(constraints);
+
+      const ownAudioTrack = await captureSystemAudioExcludingSelf();
+      if (ownAudioTrack) {
+        const videoStream = await originalGetDisplayMedia({ video: constraints.video, audio: false });
+        void env.bridge.reportCaptureMode?.({
+          mode: 'system-audio-loopback-without-self',
+          ownAudioSupported: true,
+          ownAudioApplied: true
+        });
+        return new env.MediaStream([...videoStream.getVideoTracks(), ownAudioTrack]);
+      }
+
       const audio = typeof constraints.audio === 'object' ? constraints.audio : {};
       // restrictOwnAudio is a Chromium-only display-capture constraint, absent from the DOM types.
       const audioWithRestriction = { ...audio, restrictOwnAudio: true } as MediaTrackConstraints;
       const stream = await originalGetDisplayMedia({ ...constraints, audio: audioWithRestriction });
 
-      // Ask the browser whether the exclusion is even a thing here, and whether it took effect:
-      // Chromium gates it on the OS (Windows 11) and silently ignores it elsewhere.
+      // Ask the browser whether the exclusion is even a thing here, and whether it took effect.
       const supported =
         (env.mediaDevices as { getSupportedConstraints?(): Record<string, unknown> }).getSupportedConstraints?.()
           ?.restrictOwnAudio === true;

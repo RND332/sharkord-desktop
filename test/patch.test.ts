@@ -187,7 +187,10 @@ describe('getDisplayMedia patch fail-safe', () => {
 });
 
 describe('getDisplayMedia patch on non-PipeWire platforms', () => {
-  const windowsSetup = (audioSettings: Record<string, unknown> = {}) => {
+  const windowsSetup = (
+    audioSettings: Record<string, unknown> = {},
+    getUserMedia?: (constraints?: MediaStreamConstraints) => Promise<MediaStream>
+  ) => {
     const calls: MediaStreamConstraints[] = [];
     const audioTrack = Object.assign(makeTrack('audio'), {
       getSettings: () => audioSettings
@@ -201,6 +204,7 @@ describe('getDisplayMedia patch on non-PipeWire platforms', () => {
     const env: PatchEnvironment = {
       mediaDevices: {
         getDisplayMedia,
+        getUserMedia: getUserMedia ?? (() => Promise.reject(new Error('no loopback device'))),
         getSupportedConstraints: () => ({ restrictOwnAudio: true })
       } as unknown as PatchEnvironment['mediaDevices'],
       MediaStream: FakeMediaStream as unknown as PatchEnvironment['MediaStream'],
@@ -217,6 +221,7 @@ describe('getDisplayMedia patch on non-PipeWire platforms', () => {
     };
     installGetDisplayMediaPatch(env);
     return { env, calls, original, getDisplayMedia, reportCaptureMode };
+
   };
 
   it('leaves a video-only request untouched', async () => {
@@ -246,6 +251,26 @@ describe('getDisplayMedia patch on non-PipeWire platforms', () => {
 
     expect(reportCaptureMode).toHaveBeenCalledWith({
       mode: 'system-audio',
+      ownAudioSupported: true,
+      ownAudioApplied: true
+    });
+  });
+
+  it('prefers the process-excluding loopback device when Windows offers it', async () => {
+    const loopback = Object.assign(makeTrack('audio'), { label: 'loopbackWithoutChrome' });
+    const getUserMedia = vi.fn(async () => new FakeMediaStream([loopback]) as unknown as MediaStream);
+    const { env, calls, reportCaptureMode } = windowsSetup({}, getUserMedia);
+
+    const stream = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
+
+    // the picker is asked for video only: system audio comes from the excluding device
+    expect(calls).toEqual([{ video: true, audio: false }]);
+    expect(getUserMedia).toHaveBeenCalledWith(
+      expect.objectContaining({ audio: expect.objectContaining({ deviceId: { exact: 'loopbackWithoutChrome' } }) })
+    );
+    expect(stream.getAudioTracks()).toHaveLength(1);
+    expect(reportCaptureMode).toHaveBeenCalledWith({
+      mode: 'system-audio-loopback-without-self',
       ownAudioSupported: true,
       ownAudioApplied: true
     });
