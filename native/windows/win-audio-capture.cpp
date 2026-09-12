@@ -39,11 +39,12 @@ long Argument(int argc, char** argv, const char* name, long fallback) {
   return value;
 }
 
-// Agility matters: the activation completes on an arbitrary thread.
+// Agility matters: the activation completes on an arbitrary thread, so the handler declares FtmBase
+// (after RuntimeClass, which is the order WRL requires) instead of being a plain COM object.
 class ActivationHandler final
-    : public FtmBase,
-      public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
-                                          IActivateAudioInterfaceCompletionHandler> {
+    : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+                                          IActivateAudioInterfaceCompletionHandler>,
+      public FtmBase {
  public:
   explicit ActivationHandler(HANDLE done) : done_(done) {}
 
