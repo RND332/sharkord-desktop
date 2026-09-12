@@ -187,16 +187,22 @@ describe('getDisplayMedia patch fail-safe', () => {
 });
 
 describe('getDisplayMedia patch on non-PipeWire platforms', () => {
-  const windowsSetup = () => {
+  const windowsSetup = (audioSettings: Record<string, unknown> = {}) => {
     const calls: MediaStreamConstraints[] = [];
-    const original = new FakeMediaStream([makeTrack('video')]) as unknown as MediaStream;
+    const audioTrack = Object.assign(makeTrack('audio'), {
+      getSettings: () => audioSettings
+    });
+    const original = new FakeMediaStream([makeTrack('video'), audioTrack]) as unknown as MediaStream;
     const getDisplayMedia = vi.fn(async (constraints?: MediaStreamConstraints) => {
       calls.push(constraints ?? {});
       return original;
     });
     const reportCaptureMode = vi.fn(async () => true);
     const env: PatchEnvironment = {
-      mediaDevices: { getDisplayMedia } as unknown as PatchEnvironment['mediaDevices'],
+      mediaDevices: {
+        getDisplayMedia,
+        getSupportedConstraints: () => ({ restrictOwnAudio: true })
+      } as unknown as PatchEnvironment['mediaDevices'],
       MediaStream: FakeMediaStream as unknown as PatchEnvironment['MediaStream'],
       MediaStreamTrackGenerator: (() => {}) as unknown as PatchEnvironment['MediaStreamTrackGenerator'],
       AudioData: (() => {}) as unknown as PatchEnvironment['AudioData'],
@@ -214,7 +220,7 @@ describe('getDisplayMedia patch on non-PipeWire platforms', () => {
   };
 
   it('leaves a video-only request untouched', async () => {
-    const { env, calls, original } = windowsSetup();
+    const { env, calls, original } = windowsSetup({});
     const stream = await env.mediaDevices.getDisplayMedia({ video: true });
 
     expect(stream).toBe(original);
@@ -229,7 +235,20 @@ describe('getDisplayMedia patch on non-PipeWire platforms', () => {
     expect(calls[0]?.video).toBe(true);
     expect(calls[0]?.audio).toMatchObject({ echoCancellation: false, restrictOwnAudio: true });
     // so the log and the diagnostics say which strategy actually ran
-    expect(reportCaptureMode).toHaveBeenCalledWith('system-audio-with-restriction');
+    expect(reportCaptureMode).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'system-audio' })
+    );
+  });
+
+  it('reports when the browser applied the exclusion', async () => {
+    const { env, reportCaptureMode } = windowsSetup({ restrictOwnAudio: true });
+    await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+    expect(reportCaptureMode).toHaveBeenCalledWith({
+      mode: 'system-audio',
+      ownAudioSupported: true,
+      ownAudioApplied: true
+    });
   });
 
   it('never touches the capture bridge there', async () => {

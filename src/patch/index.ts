@@ -34,7 +34,11 @@ export type PatchEnvironment = {
   bridge: {
     platform?: string;
     appInfo?(): Promise<{ version: string; platform: string }>;
-    reportCaptureMode?(mode: string): Promise<boolean>;
+    reportCaptureMode?(info: {
+      mode: string;
+      ownAudioSupported?: boolean;
+      ownAudioApplied?: boolean;
+    }): Promise<boolean>;
     acquireCapture(): Promise<void>;
     releaseCapture(): Promise<void>;
     onPcm(cb: (chunk: Uint8Array) => void): () => void;
@@ -121,8 +125,17 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
       const audio = typeof constraints.audio === 'object' ? constraints.audio : {};
       // restrictOwnAudio is a Chromium-only display-capture constraint, absent from the DOM types.
       const audioWithRestriction = { ...audio, restrictOwnAudio: true } as MediaTrackConstraints;
-      void env.bridge.reportCaptureMode?.('system-audio-with-restriction');
-      return originalGetDisplayMedia({ ...constraints, audio: audioWithRestriction });
+      const stream = await originalGetDisplayMedia({ ...constraints, audio: audioWithRestriction });
+
+      // Ask the browser whether the exclusion is even a thing here, and whether it took effect:
+      // Chromium gates it on the OS (Windows 11) and silently ignores it elsewhere.
+      const supported =
+        (env.mediaDevices as { getSupportedConstraints?(): Record<string, unknown> }).getSupportedConstraints?.()
+          ?.restrictOwnAudio === true;
+      const applied =
+        (stream.getAudioTracks()[0]?.getSettings?.() as Record<string, unknown> | undefined)?.restrictOwnAudio === true;
+      void env.bridge.reportCaptureMode?.({ mode: 'system-audio', ownAudioSupported: supported, ownAudioApplied: applied });
+      return stream;
     };
     return;
   }
@@ -140,7 +153,7 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
     let injected: { track: AudioTrackLike; release(): void };
     try {
       injected = await createCapturedTrack();
-      void env.bridge.reportCaptureMode?.('pipewire-pcm');
+      void env.bridge.reportCaptureMode?.({ mode: 'pipewire-pcm' });
     } catch (error) {
       log('system audio capture unavailable, sharing video only', error);
       return videoStream;

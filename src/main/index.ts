@@ -448,8 +448,24 @@ const bootstrap = async (): Promise<void> => {
   };
 
   ipcMain.handle('app:info', () => ({ version: app.getVersion(), platform: process.platform }));
-  ipcMain.handle('capture:mode', (_event, mode: unknown) => {
-    log('page capture mode:', String(mode));
+  ipcMain.handle('capture:mode', (_event, info: unknown) => {
+    const details = (info ?? {}) as { mode?: string; ownAudioSupported?: boolean; ownAudioApplied?: boolean };
+    log('page capture mode:', JSON.stringify(details));
+    // The page just told us, from the browser's own answer, whether the voice channel is excluded.
+    if (details.ownAudioApplied === false && !warnedAboutEcho) {
+      warnedAboutEcho = true;
+      log(
+        `WARNING: this browser/OS does not exclude the app's own audio from the share ` +
+          `(restrictOwnAudio supported: ${details.ownAudioSupported === true}) — viewers will also hear the voice channel. ` +
+          'Server → Show diagnostics… has the details; SHARKORD_WINDOWS_AUDIO=off gives video-only shares.'
+      );
+      if (Notification.isSupported()) {
+        new Notification({
+          title: 'Viewers will hear the voice channel',
+          body: 'This browser/OS cannot leave your own audio out of the screen share (needs Windows 11). Set SHARKORD_WINDOWS_AUDIO=off for video-only shares.'
+        }).show();
+      }
+    }
     return true;
   });
   ipcMain.handle('server:current', () => currentServerUrl);
