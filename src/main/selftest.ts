@@ -1,9 +1,10 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { BrowserWindow } from 'electron';
 import type { Config } from './config';
-import type { TapCapture } from './tap';
+import { isOwnProcess, type TapCapture } from './tap';
 import { amplitudeAt } from '../shared/pcm';
 import { writeWav } from './wav';
 
@@ -254,6 +255,8 @@ export const runSelftest = async (options: SelftestOptions): Promise<{ pass: boo
 
   pcTone.kill();
   control.kill();
+  // Snapshot before stopping: `stop()` clears the link bookkeeping.
+  const tappedPids = tap.tappedProcessIds;
   tap.stop();
 
   const pageResult = (await window.webContents.executeJavaScript(
@@ -274,11 +277,40 @@ export const runSelftest = async (options: SelftestOptions): Promise<{ pass: boo
   const MIN_TONE = 0.15;
   const MAX_LEAK = 0.02;
 
+  // The guarantee viewers depend on: no stream from this app's own process tree is ever linked.
+  const ownPids = tappedPids.filter((pid) => isOwnProcess(pid));
+  if (ownPids.length > 0) {
+    failures.push(`the tap linked this app's own audio (pids: ${ownPids.join(', ')})`);
+  }
+  if (tappedPids.length === 0) {
+    failures.push('the tap linked no application at all');
+  }
+
+  // Another instance of this app on the same machine is a separate application, so its audio is
+  // legitimately captured — that makes the tone-based leak check meaningless while it runs.
+  const otherInstances = tappedPids.filter((pid) => {
+    try {
+      return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes('sharkord');
+    } catch {
+      return false;
+    }
+  });
+  if (otherInstances.length > 0) {
+    log(
+      `note: another Sharkord instance (pids: ${otherInstances.join(', ')}) is playing audio; ` +
+        'its playback is captured on purpose and the tone-based leak check is skipped'
+    );
+  }
+
   if (capturePc < MIN_TONE) failures.push(`another app's audio missing from the capture (${capturePc.toFixed(3)})`);
-  if (captureApp > MAX_LEAK) failures.push(`the client's own audio leaked into the capture (${captureApp.toFixed(3)})`);
+  if (otherInstances.length === 0 && captureApp > MAX_LEAK) {
+    failures.push(`the client's own audio leaked into the capture (${captureApp.toFixed(3)})`);
+  }
   if (controlApp < MIN_TONE) failures.push(`the app tone was not audible at all (${controlApp.toFixed(3)})`);
   if (injectedPc < MIN_TONE) failures.push(`injected track is silent (${injectedPc.toFixed(3)})`);
-  if (injectedApp > MAX_LEAK) failures.push(`injected track carries the client's own audio (${injectedApp.toFixed(3)})`);
+  if (otherInstances.length === 0 && injectedApp > MAX_LEAK) {
+    failures.push(`injected track carries the client's own audio (${injectedApp.toFixed(3)})`);
+  }
 
   const pass = failures.length === 0;
   if (!pass) {
@@ -289,6 +321,7 @@ export const runSelftest = async (options: SelftestOptions): Promise<{ pass: boo
   log(
     `selftest ${pass ? 'PASS' : 'FAIL'} ` +
       `capture[pc=${capturePc.toFixed(3)} app=${captureApp.toFixed(3)}] ` +
+      `tapped[${tappedPids.length} pid(s), own=${ownPids.length}] ` +
       `control[app=${controlApp.toFixed(3)}] ` +
       `injected[pc=${injectedPc.toFixed(3)} app=${injectedApp.toFixed(3)}] ` +
       `defaultSink=${defaultSink} appTone=${JSON.stringify(appTone)}` +

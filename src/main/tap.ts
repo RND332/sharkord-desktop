@@ -164,6 +164,7 @@ export class TapCapture {
   private pollTimer: NodeJS.Timeout | null = null;
   private reconciling: Promise<void> | null = null;
   private readonly linked = new Set<string>();
+  private readonly tappedPids = new Set<number>();
   private readonly dataCallbacks = new Set<(chunk: Buffer) => void>();
   private readonly stateCallbacks = new Set<(state: TapState) => void>();
   private readonly spawner: Spawner;
@@ -196,6 +197,11 @@ export class TapCapture {
     return this.linked.size;
   }
 
+  /** Processes whose playback is currently linked into the tap. */
+  get tappedProcessIds(): number[] {
+    return [...this.tappedPids];
+  }
+
   start(): void {
     if (this.child) return;
     this.stopping = false;
@@ -216,6 +222,7 @@ export class TapCapture {
     this.child?.kill();
     this.child = null;
     this.linked.clear();
+    this.tappedPids.clear();
     this.emitState();
   }
 
@@ -267,6 +274,7 @@ export class TapCapture {
           try {
             await this.runner('pw-link', [`${stream.nodeId}:${port}`, `${graph.tapNodeId}:${target}`]);
             this.linked.add(key);
+            if (stream.processId !== null) this.tappedPids.add(stream.processId);
             this.log(`tapped ${stream.appName || stream.nodeId}`);
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
@@ -281,8 +289,14 @@ export class TapCapture {
     }
 
     // Streams that vanished take their links with them.
+    const alivePids = new Set(
+      graph.streams.filter((stream) => alive.has(stream.nodeId)).map((stream) => stream.processId)
+    );
     for (const key of [...this.linked]) {
       if (!alive.has(Number(key.slice(0, key.indexOf(':'))))) this.linked.delete(key);
+    }
+    for (const pid of [...this.tappedPids]) {
+      if (!alivePids.has(pid)) this.tappedPids.delete(pid);
     }
     this.emitState();
   }

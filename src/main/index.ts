@@ -1,9 +1,21 @@
-import { app, BrowserWindow, desktopCapturer, ipcMain, Menu, nativeImage, session, Tray } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  clipboard,
+  desktopCapturer,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  session,
+  Tray
+} from 'electron';
 import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from './config';
+import { describeEnvironment, log, readLogTail } from './logger';
 import { removeLegacyRouting } from './legacy';
 import { pickDisplaySource, registerPickerIpc } from './picker';
 import { normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
@@ -13,9 +25,6 @@ import { checkForUpdatesNow, setupAutoUpdates } from './updater';
 import { writeWav } from './wav';
 
 const config = loadConfig();
-const log = (...parts: unknown[]): void => {
-  console.log('[sharkord-desktop]', ...parts);
-};
 
 const tap = new TapCapture({ tapName: config.tapName, log });
 
@@ -47,7 +56,7 @@ const installPermissionHandlers = (origin: () => string): void => {
   // Electron has no screen picker of its own. On Wayland `getSources` raises the desktop's own
   // dialog (Hyprland's share picker) and returns what the user chose there; everywhere else —
   // Windows, macOS, X11 — we have to ask ourselves, in a window like Discord's.
-  session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
+  session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
     const wayland = process.platform === 'linux' && process.env.XDG_SESSION_TYPE === 'wayland';
     const wantsSystemPicker = process.env.SHARKORD_PICKER === 'system' || (wayland && process.env.SHARKORD_PICKER !== 'inapp');
 
@@ -59,17 +68,37 @@ const installPermissionHandlers = (origin: () => string): void => {
         fetchWindowIcons: !wantsSystemPicker
       });
 
+      log('display sources:', JSON.stringify({ count: sources.length, picker: wantsSystemPicker ? 'system' : 'in-app' }));
+      if (sources.length === 0) {
+        void dialog.showMessageBox({
+          type: 'warning',
+          title: 'Nothing to share',
+          message: 'The system reported no capturable screen or window.'
+        });
+      }
+
       const picked = wantsSystemPicker
         ? sources[0] ?? null
-        : await pickDisplaySource(mainWindow, sources);
+        : await pickDisplaySource(mainWindow, sources, log);
 
       if (!picked) {
         log('screen share cancelled: no source selected');
         callback({});
         return;
       }
-      log('screen share source:', JSON.stringify({ name: picked.name, of: sources.length, picker: wantsSystemPicker ? 'system' : 'in-app' }));
-      callback({ video: picked });
+      // Windows can hand us system audio; `restrictOwnAudio` (added by the injected patch) keeps
+      // this client's own playback out of it. Set SHARKORD_WINDOWS_AUDIO=off to opt out.
+      const wantsAudio = request.audioRequested && process.platform === 'win32' && process.env.SHARKORD_WINDOWS_AUDIO !== 'off';
+      log(
+        'screen share source:',
+        JSON.stringify({
+          name: picked.name,
+          of: sources.length,
+          picker: wantsSystemPicker ? 'system' : 'in-app',
+          audio: wantsAudio ? 'loopback' : request.audioRequested ? 'ignored' : 'not requested'
+        })
+      );
+      callback(wantsAudio ? { video: picked, audio: 'loopback' } : { video: picked });
     } catch (error) {
       log('screen share failed:', error);
       callback({});
@@ -239,6 +268,62 @@ const bootstrap = async (): Promise<void> => {
             accelerator: 'CmdOrCtrl+Shift+S',
             click: () => {
               void mainWindow?.loadFile(connectPagePath);
+            }
+          },
+          {
+            label: 'Share a screen…',
+            click: () => {
+              void (async () => {
+                try {
+                  const sources = await desktopCapturer.getSources({
+                    types: ['screen', 'window'],
+                    thumbnailSize: { width: 320, height: 180 },
+                    fetchWindowIcons: true
+                  });
+                  log('picker test:', JSON.stringify({ count: sources.length }));
+                  if (sources.length === 0) {
+                    await dialog.showMessageBox({
+                      type: 'warning',
+                      title: 'Nothing to share',
+                      message: 'The system reported no capturable screen or window.'
+                    });
+                    return;
+                  }
+                  const picked = await pickDisplaySource(mainWindow, sources, log);
+                  await dialog.showMessageBox({
+                    type: 'info',
+                    title: 'Picker test',
+                    message: picked ? `You picked: ${picked.name}` : 'Cancelled'
+                  });
+                } catch (error) {
+                  log('picker test failed:', error);
+                  await dialog.showMessageBox({
+                    type: 'error',
+                    title: 'Picker test failed',
+                    message: error instanceof Error ? error.message : String(error)
+                  });
+                }
+              })();
+            }
+          },
+          {
+            label: 'Show diagnostics…',
+            click: () => {
+              void (async () => {
+                const { response } = await dialog.showMessageBox({
+                  type: 'info',
+                  title: 'Diagnostics',
+                  message: 'Sharkord Desktop',
+                  detail: `${describeEnvironment()}\n\n${readLogTail(40)}`,
+                  buttons: ['Copy to clipboard', 'Close'],
+                  defaultId: 1,
+                  cancelId: 1
+                });
+                if (response === 0) {
+                  clipboard.writeText(`${describeEnvironment()}\n\n${readLogTail(300)}`);
+                  log('diagnostics copied to the clipboard');
+                }
+              })();
             }
           },
           {

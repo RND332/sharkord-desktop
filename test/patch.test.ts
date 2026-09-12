@@ -101,6 +101,7 @@ const setup = (options: { resolveWrite?: () => Promise<void> } = {}) => {
     MediaStreamTrackGenerator: FakeGenerator as unknown as PatchEnvironment['MediaStreamTrackGenerator'],
     AudioData: makeAudioData(writes) as unknown as PatchEnvironment['AudioData'],
     bridge: {
+      platform: 'linux',
       acquireCapture,
       releaseCapture,
       onPcm: (cb) => {
@@ -145,6 +146,56 @@ const interleaved = (frames: number, value: number): Uint8Array => {
 const flush = async (): Promise<void> => {
   for (let i = 0; i < 4; i += 1) await Promise.resolve();
 };
+
+describe('getDisplayMedia patch on non-PipeWire platforms', () => {
+  const windowsSetup = () => {
+    const calls: MediaStreamConstraints[] = [];
+    const original = new FakeMediaStream([makeTrack('video')]) as unknown as MediaStream;
+    const getDisplayMedia = vi.fn(async (constraints?: MediaStreamConstraints) => {
+      calls.push(constraints ?? {});
+      return original;
+    });
+    const env: PatchEnvironment = {
+      mediaDevices: { getDisplayMedia } as unknown as PatchEnvironment['mediaDevices'],
+      MediaStream: FakeMediaStream as unknown as PatchEnvironment['MediaStream'],
+      MediaStreamTrackGenerator: (() => {}) as unknown as PatchEnvironment['MediaStreamTrackGenerator'],
+      AudioData: (() => {}) as unknown as PatchEnvironment['AudioData'],
+      bridge: {
+        platform: 'win32',
+        acquireCapture: vi.fn(async () => {}),
+        releaseCapture: vi.fn(async () => {}),
+        onPcm: () => () => {}
+      },
+      log: () => {}
+    };
+    installGetDisplayMediaPatch(env);
+    return { env, calls, original, getDisplayMedia };
+  };
+
+  it('leaves a video-only request untouched', async () => {
+    const { env, calls, original } = windowsSetup();
+    const stream = await env.mediaDevices.getDisplayMedia({ video: true });
+
+    expect(stream).toBe(original);
+    expect(calls).toEqual([{ video: true }]);
+  });
+
+  it('asks Chromium to keep this app out of the captured system audio', async () => {
+    const { env, calls } = windowsSetup();
+    await env.mediaDevices.getDisplayMedia({ video: true, audio: { echoCancellation: false } });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.video).toBe(true);
+    expect(calls[0]?.audio).toMatchObject({ echoCancellation: false, restrictOwnAudio: true });
+  });
+
+  it('never touches the capture bridge there', async () => {
+    const { env } = windowsSetup();
+    await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+    expect(env.bridge.acquireCapture).not.toHaveBeenCalled();
+  });
+});
 
 describe('getDisplayMedia patch', () => {
   it('leaves a video-only request untouched', async () => {

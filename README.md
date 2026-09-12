@@ -136,9 +136,12 @@ asks the user:
 
 ## Known limits
 
-- The audio exclusion is Linux/PipeWire only. Windows and macOS get video through the picker and no
-  injected audio: Electron can loop the whole system output back on Windows, but that would also send
-  the voice channel you hear to the viewers, which is the thing this app exists to avoid.
+- The audio exclusion is Linux/PipeWire only. On **Windows** the app additionally asks Chromium for
+  system audio with `restrictOwnAudio`, so the share carries the PC's sound but not this client's own
+  playback — if a viewer ever hears themselves, set `SHARKORD_WINDOWS_AUDIO=off` and check
+  **Server → Show diagnostics…**. macOS gets video through the picker and no system audio.
+- Another instance of this app on the same machine is a separate application: its playback is captured
+  by design, which is why the self test notes it and skips the tone-based leak check while it runs.
 - Applications that bypass the PipeWire graph (raw ALSA exclusive mode) are not captured.
 - Per-application volume and mute are honoured (the tap is taken after them); a sink's own volume or
   mute is not, because the tap never passes through the device.
@@ -153,6 +156,9 @@ asks the user:
 | `src/connect/connect.html` | first-run / change-server picker |
 | `src/main/tap.ts` | recording node + per-application link management |
 | `src/main/legacy.ts` | cleans up the virtual sink older versions created |
+| `src/main/logger.ts` | console + `main.log` for bug reports |
+| `src/main/updater.ts` | automatic updates from the release page |
+| `src/main/picker.ts` | screen/window picker for platforms without one |
 | `src/main/selftest.ts` | tone-exclusion proof |
 | `src/preload/index.ts` | capture bridge |
 | `src/patch/` | main-world `getDisplayMedia` patch |

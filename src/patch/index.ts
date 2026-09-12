@@ -32,6 +32,7 @@ export type PatchEnvironment = {
     data: Float32Array;
   }) => AudioDataLike;
   bridge: {
+    platform?: string;
     acquireCapture(): Promise<void>;
     releaseCapture(): Promise<void>;
     onPcm(cb: (chunk: Uint8Array) => void): () => void;
@@ -106,6 +107,21 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
 
     return { track: generator, release };
   };
+
+  // Windows and macOS hand the capture to Chromium; the only thing left to fix is asking it to
+  // leave our own playback out of the system audio, so viewers do not hear themselves.
+  if (env.bridge.platform !== 'linux') {
+    mediaDevices.getDisplayMedia = async (
+      constraints: MediaStreamConstraints = {}
+    ): Promise<MediaStream> => {
+      if (!constraints.audio) return originalGetDisplayMedia(constraints);
+      const audio = typeof constraints.audio === 'object' ? constraints.audio : {};
+      // restrictOwnAudio is a Chromium-only display-capture constraint, absent from the DOM types.
+      const audioWithRestriction = { ...audio, restrictOwnAudio: true } as MediaTrackConstraints;
+      return originalGetDisplayMedia({ ...constraints, audio: audioWithRestriction });
+    };
+    return;
+  }
 
   mediaDevices.getDisplayMedia = async (
     constraints: MediaStreamConstraints = {}

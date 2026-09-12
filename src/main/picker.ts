@@ -46,9 +46,11 @@ export const registerPickerIpc = (): void => {
  */
 export const pickDisplaySource = async (
   parent: BrowserWindow | null,
-  sources: DesktopCapturerSource[]
+  sources: DesktopCapturerSource[],
+  log: (...parts: unknown[]) => void = () => {}
 ): Promise<DesktopCapturerSource | null> => {
   if (sources.length === 0) return null;
+  log('picker opened with', sources.length, 'sources');
 
   const picker = new BrowserWindow({
     width: 920,
@@ -84,5 +86,7 @@ export const pickDisplaySource = async (
 
   const id = await choice.promise;
   if (!picker.isDestroyed()) picker.destroy();
-  return resolveChoice(sources, id);
+  const picked = resolveChoice(sources, id);
+  log('picker result:', picked ? picked.name : 'cancelled');
+  return picked;
 };
