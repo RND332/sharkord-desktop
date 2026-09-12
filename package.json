@@ -1,6 +1,6 @@
 {
   "name": "sharkord-desktop",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "description": "Sharkord desktop client whose screen share carries the whole PC's audio except Sharkord itself",
   "author": "Talgat Minigaliev <https://github.com/RND332>",
@@ -60,7 +60,14 @@
     },
     "portable": {
       "artifactName": "sharkord-desktop-${version}-win-${arch}-portable.${ext}"
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "RND332",
+        "repo": "sharkord-desktop"
+      }
+    ]
   },
   "devDependencies": {
     "@types/node": "^22.20.2",
@@ -78,5 +85,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/RND332/sharkord-desktop.git"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

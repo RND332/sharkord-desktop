@@ -9,6 +9,7 @@ import { pickDisplaySource, registerPickerIpc } from './picker';
 import { normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
 import { runSelftest } from './selftest';
 import { TapCapture } from './tap';
+import { checkForUpdatesNow, setupAutoUpdates } from './updater';
 import { writeWav } from './wav';
 
 const config = loadConfig();
@@ -113,6 +114,11 @@ const shutdown = async (code: number): Promise<void> => {
     }
   }
 
+  if (code === 0) {
+    // A normal quit goes through app.quit() so a downloaded update can install on the way out.
+    app.quit();
+    return;
+  }
   app.exit(code);
 };
 
@@ -235,6 +241,12 @@ const bootstrap = async (): Promise<void> => {
               void mainWindow?.loadFile(connectPagePath);
             }
           },
+          {
+            label: 'Check for updates…',
+            click: () => {
+              void checkForUpdatesNow(log);
+            }
+          },
           { type: 'separator' },
           { role: 'quit' }
         ]
@@ -298,6 +310,13 @@ const bootstrap = async (): Promise<void> => {
     await shutdown(result.pass ? 0 : 1);
     return;
   }
+
+  setupAutoUpdates({
+    log,
+    beforeInstall: () => {
+      shuttingDown = true;
+    }
+  });
 
   const startUrl = config.url ?? readServerUrl(serverConfigPath);
   if (startUrl) {
