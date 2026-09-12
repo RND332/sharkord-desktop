@@ -74,9 +74,21 @@ bun run dist:linux     # packaged builds (dist:win, dist:mac on those hosts)
 bun run build && electron . --cleanup   # remove the virtual sink an older version left behind
 ```
 
-`scripts/install-local.sh` installs the packaged app for the current user without root: binary in
-`~/.local/opt`, `sharkord-desktop` on `PATH`, plus icon and desktop entry. Re-run it after an update.
+`scripts/install-local.sh` installs the app for the current user without root: it takes the Linux
+AppImage from the latest GitHub release into `~/.local/opt`, puts `sharkord-desktop` on `PATH` and
+adds icon + desktop entry. `SHARKORD_LOCAL_BUILD=1` builds from the checkout instead of downloading.
 Arch users can also `sudo pacman -U` the `.pacman` from Releases.
+
+### Updates
+
+The app checks the [release page](https://github.com/RND332/sharkord-desktop/releases) shortly after
+startup and every time you pick **Server → Check for updates…**:
+
+- **Windows installer (NSIS)** and **Linux AppImage** replace themselves in place; a downloaded update
+  asks for a restart and is also applied on the next quit.
+- **deb / pacman** installs are updated by their package manager — the app says so instead of failing.
+- `SHARKORD_UPDATE_FEED=https://…` points the updater at another host (a mirror, or a local test feed).
+- Development checkouts never update themselves (`app.isPackaged` gate).
 
 ### Configuration
 
