@@ -17,7 +17,7 @@ and music, never their own voices.
 | Platform | Status |
 |---|---|
 | **Linux + PipeWire** | Full feature — this is what the project is about, verified on Arch/Hyprland/Wayland with Electron 44 |
-| **Windows 11 / Server 2022 (build 20348+)** | Full feature — `native/windows/win-audio-capture.cpp` captures the default output in WASAPI exclude mode for our own process tree, bypassing Chromium's build-22000 gate. Built and shipped in the Windows package; verified by CI build + the runtime probe. |
+| **Windows 11 / Server 2022 (build 20348+)** | Full feature — `native/windows/win-audio-capture.cpp` captures the default output in WASAPI exclude mode for our own process tree, bypassing Chromium's build-22000 gate. Compiled in CI and shipped inside the Windows package as `resources/native/win-audio-capture.exe`; not yet run on a real Windows 11 machine. |
 | **Windows 10 (≤19045)** | Video, plus system audio only when the app can *prove* the capture does not contain its own playback (see Known limits). The supported way to get audio: point Sharkord at a second output device and share the other one. |
 | macOS | Wrapper only, untested. No own capture: the share carries whatever the platform gives `getDisplayMedia`, after the same proof. |
 
