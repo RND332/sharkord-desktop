@@ -33,6 +33,7 @@ export type PatchEnvironment = {
   }) => AudioDataLike;
   bridge: {
     platform?: string;
+    appInfo?(): Promise<{ version: string; platform: string }>;
     acquireCapture(): Promise<void>;
     releaseCapture(): Promise<void>;
     onPcm(cb: (chunk: Uint8Array) => void): () => void;
@@ -110,7 +111,8 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
 
   // Windows and macOS hand the capture to Chromium; the only thing left to fix is asking it to
   // leave our own playback out of the system audio, so viewers do not hear themselves.
-  if (env.bridge.platform !== 'linux') {
+  const usesPlatformCapture = env.bridge.platform === 'win32' || env.bridge.platform === 'darwin';
+  if (usesPlatformCapture) {
     mediaDevices.getDisplayMedia = async (
       constraints: MediaStreamConstraints = {}
     ): Promise<MediaStream> => {

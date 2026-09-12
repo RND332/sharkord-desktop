@@ -89,7 +89,10 @@ const installPermissionHandlers = (origin: () => string): void => {
       }
       // Windows can hand us system audio; `restrictOwnAudio` (added by the injected patch) keeps
       // this client's own playback out of it. Set SHARKORD_WINDOWS_AUDIO=off to opt out.
-      const wantsAudio = request.audioRequested && process.platform === 'win32' && process.env.SHARKORD_WINDOWS_AUDIO !== 'off';
+      // Off by default: the only system-audio path Electron exposes on Windows captures the whole
+      // output, including this client's own playback, and `restrictOwnAudio` does not filter it out
+      // in practice — viewers would hear themselves. Opt in with SHARKORD_WINDOWS_AUDIO=on.
+      const wantsAudio = request.audioRequested && process.platform === 'win32' && process.env.SHARKORD_WINDOWS_AUDIO === 'on';
       log(
         'screen share source:',
         JSON.stringify({
@@ -380,13 +383,39 @@ const bootstrap = async (): Promise<void> => {
       const readiness = (await target.webContents.executeJavaScript(
         `({
           bridge: typeof window.sharkordDesktop,
+          platform: window.sharkordDesktop?.platform ?? 'missing',
+          badge: document.querySelector('[data-sharkord-desktop-version]')?.textContent ?? 'missing',
+          branch: (() => {
+            const s = String(navigator.mediaDevices?.getDisplayMedia ?? '');
+            if (s.includes('native code')) return 'native';
+            return s.includes('createCapturedTrack') ? 'linux-pcm' : 'passthrough';
+          })(),
           patched: !String(navigator.mediaDevices?.getDisplayMedia ?? '').includes('native code'),
+          source: String(navigator.mediaDevices?.getDisplayMedia ?? '').slice(0, 200),
           generator: typeof MediaStreamTrackGenerator === 'function'
         })`,
         true
-      )) as { bridge: string; patched: boolean; generator: boolean };
+      )) as {
+        bridge: string;
+        platform: string;
+        branch: string;
+        badge: string;
+        patched: boolean;
+        source: string;
+        generator: boolean;
+      };
       if (readiness.bridge === 'object' && readiness.patched) {
         log('screen-share audio ready:', JSON.stringify(readiness));
+        if (config.mode === 'capture' && readiness.branch !== 'linux-pcm') {
+          log(`WARNING: expected the PipeWire capture path, got "${readiness.branch}"`);
+          log('injected getDisplayMedia source:', readiness.source);
+          if (Notification.isSupported()) {
+            new Notification({
+              title: 'Screen-share audio is not active',
+              body: 'The capture path did not load. Screen shares will be silent — check Server → Show diagnostics…'
+            }).show();
+          }
+        }
         break;
       }
       if (attempt === 9) {
@@ -396,6 +425,7 @@ const bootstrap = async (): Promise<void> => {
     }
   };
 
+  ipcMain.handle('app:info', () => ({ version: app.getVersion(), platform: process.platform }));
   ipcMain.handle('server:current', () => currentServerUrl);
   ipcMain.handle('server:submit', async (_event, raw: unknown) => {
     const normalized = normalizeServerUrl(typeof raw === 'string' ? raw : '');

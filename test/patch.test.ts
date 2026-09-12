@@ -147,6 +147,45 @@ const flush = async (): Promise<void> => {
   for (let i = 0; i < 4; i += 1) await Promise.resolve();
 };
 
+describe('getDisplayMedia patch fail-safe', () => {
+  it('records audio itself when the platform is unknown', async () => {
+    const writes: WriteRecord[] = [];
+    const pcmCallbacks: Array<(chunk: Uint8Array) => void> = [];
+    const original = new FakeMediaStream([makeTrack('video')]) as unknown as MediaStream;
+    const env: PatchEnvironment = {
+      mediaDevices: { getDisplayMedia: vi.fn(async () => original) } as unknown as PatchEnvironment['mediaDevices'],
+      MediaStream: FakeMediaStream as unknown as PatchEnvironment['MediaStream'],
+      MediaStreamTrackGenerator: class {
+        kind = 'audio';
+        readyState = 'live';
+        writable = { getWriter: () => ({ write: () => Promise.resolve() }) };
+        stop(): void {}
+        addEventListener(): void {}
+      } as unknown as PatchEnvironment['MediaStreamTrackGenerator'],
+      AudioData: makeAudioData(writes) as unknown as PatchEnvironment['AudioData'],
+      bridge: {
+        // undefined on purpose: an older preload, a stripped bridge, anything unexpected
+        acquireCapture: vi.fn(async () => {}),
+        releaseCapture: vi.fn(async () => {}),
+        onPcm: (cb) => {
+          pcmCallbacks.push(cb);
+          return () => {};
+        }
+      },
+      log: () => {},
+      setIntervalFn: (() => 0) as unknown as typeof setInterval,
+      clearIntervalFn: (() => {}) as unknown as typeof clearInterval
+    };
+
+    installGetDisplayMediaPatch(env);
+    const stream = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
+
+    // The PipeWire path must win: an unknown platform is not a reason to go silent.
+    expect(env.bridge.acquireCapture).toHaveBeenCalledTimes(1);
+    expect(stream.getAudioTracks()).toHaveLength(1);
+  });
+});
+
 describe('getDisplayMedia patch on non-PipeWire platforms', () => {
   const windowsSetup = () => {
     const calls: MediaStreamConstraints[] = [];

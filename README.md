@@ -138,10 +138,11 @@ asks the user:
 
 ## Known limits
 
-- The audio exclusion is Linux/PipeWire only. On **Windows** the app additionally asks Chromium for
-  system audio with `restrictOwnAudio`, so the share carries the PC's sound but not this client's own
-  playback — if a viewer ever hears themselves, set `SHARKORD_WINDOWS_AUDIO=off` and check
-  **Server → Show diagnostics…**. macOS gets video through the picker and no system audio.
+- The audio exclusion is Linux/PipeWire only. On **Windows** the only system-audio path Electron
+  exposes captures the whole output, including this client's own playback, and Chromium's
+  `restrictOwnAudio` does not filter it out in that path — viewers hear themselves — so it is off
+  unless you set `SHARKORD_WINDOWS_AUDIO=on`. macOS gets video through the picker and no system
+  audio.
 - Another instance of this app on the same machine is a separate application: its playback is captured
   by design, which is why the self test notes it and skips the tone-based leak check while it runs.
 - Applications that bypass the PipeWire graph (raw ALSA exclusive mode) are not captured.

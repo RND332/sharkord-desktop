@@ -5,6 +5,10 @@ type PcmHandler = (event: unknown, chunk: Uint8Array) => void;
 let holders = 0;
 
 const bridge = {
+  /** The page picks its capture strategy from this. */
+  platform: process.platform,
+  /** Version/platform for the badge the page shows in its corner. */
+  appInfo: (): Promise<{ version: string; platform: string }> => ipcRenderer.invoke('app:info'),
   /** Used by the built-in server picker; harmless on the client page. */
   currentServer: (): Promise<string | null> => ipcRenderer.invoke('server:current'),
   submitServer: (url: string): Promise<{ ok: boolean; error?: string }> =>
