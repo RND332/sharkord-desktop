@@ -141,13 +141,21 @@ asks the user:
 
 ## Known limits
 
-- On **Windows** the app captures system audio itself through Chromium's `loopbackWithoutChrome`
-  device: a WASAPI **process loopback in exclude mode** for this app's process tree, which Windows has
-  supported since 10 2004. (Chromium's own `restrictOwnAudio` constraint does the same but is gated to
-  Windows 11, and Electron only honoured it inside `setDisplayMediaRequestHandler` from v44 — so the
-  device is requested directly and the constraint is only the fallback.) When neither is available the
-  app logs and warns that viewers will also hear the voice channel; `SHARKORD_WINDOWS_AUDIO=off` gives
-  video-only shares.
+- **Windows audio, precisely**: Chromium implements the exclusion with Windows' WASAPI *process
+  loopback in exclude mode* (`PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE`, see
+  `media/audio/win/audio_low_latency_input_win.cc`), but gates it with `IsRestrictOwnAudioSupported()`
+  to **Windows 11 (build 22000)**. Microsoft documents the underlying
+  [`AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS`](https://learn.microsoft.com/en-us/windows/win32/api/audioclientactivationparams/ns-audioclientactivationparams-audioclient_process_loopback_params)
+  as requiring **build 20348**, so on a Windows 10 22H2 machine (19045) the exclusion is not available
+  to any Chromium-based client. The app therefore requests system audio only after the browser says it
+  supports the exclusion (`getSupportedConstraints().restrictOwnAudio`) and verifies the track's own
+  settings afterwards; otherwise it shares video only and says so.
+  `SHARKORD_WINDOWS_AUDIO=on` forces system audio anyway (it will echo the voice channel).
+
+  **Workaround that works on any Windows 10**: give the client its own output device. Windows can route
+  one application to another device (Settings → System → Sound → Volume mixer): point Sharkord at your
+  headphones and leave everything else on the speakers, then share the speakers' screen — the capture
+  contains the games and music but not the voices you hear in the headphones.
 - macOS gets video through the picker, no system audio.
 - Another instance of this app on the same machine is a separate application: its playback is captured
   by design, which is why the self test notes it and skips the tone-based leak check while it runs.

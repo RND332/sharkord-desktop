@@ -7,6 +7,8 @@ let holders = 0;
 const bridge = {
   /** The page picks its capture strategy from this. */
   platform: process.platform,
+  /** SHARKORD_WINDOWS_AUDIO=on: include system audio even where it cannot exclude our own playback. */
+  forceSystemAudio: process.env.SHARKORD_WINDOWS_AUDIO === 'on',
   /** Version/platform for the badge the page shows in its corner. */
   appInfo: (): Promise<{ version: string; platform: string }> => ipcRenderer.invoke('app:info'),
   /** The page reports which capture strategy it installed; it lands in the log. */

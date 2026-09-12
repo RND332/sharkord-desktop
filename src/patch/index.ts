@@ -148,6 +148,18 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
     ): Promise<MediaStream> => {
       if (!constraints.audio) return originalGetDisplayMedia(constraints);
 
+      // Before asking for system audio at all, find out whether this browser can leave us out of it.
+      // Chromium reports support per platform, and an unsupported constraint is silently dropped —
+      // which would send the voice channel you hear to your viewers.
+      const supported =
+        (env.mediaDevices as { getSupportedConstraints?(): Record<string, unknown> }).getSupportedConstraints?.()
+          ?.restrictOwnAudio === true;
+      const forced = (env.bridge as { forceSystemAudio?: boolean }).forceSystemAudio === true;
+      if (!supported && !forced) {
+        void env.bridge.reportCaptureMode?.({ mode: 'system-audio-unavailable', ownAudioSupported: false });
+        return originalGetDisplayMedia({ video: constraints.video, audio: false });
+      }
+
       const ownAudioTrack = await captureSystemAudioExcludingSelf();
       if (ownAudioTrack) {
         const videoStream = await originalGetDisplayMedia({ video: constraints.video, audio: false });
@@ -164,10 +176,7 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
       const audioWithRestriction = { ...audio, restrictOwnAudio: true } as MediaTrackConstraints;
       const stream = await originalGetDisplayMedia({ ...constraints, audio: audioWithRestriction });
 
-      // Ask the browser whether the exclusion is even a thing here, and whether it took effect.
-      const supported =
-        (env.mediaDevices as { getSupportedConstraints?(): Record<string, unknown> }).getSupportedConstraints?.()
-          ?.restrictOwnAudio === true;
+      // Ask the browser whether the exclusion took effect on the track it produced.
       const applied =
         (stream.getAudioTracks()[0]?.getSettings?.() as Record<string, unknown> | undefined)?.restrictOwnAudio === true;
       void env.bridge.reportCaptureMode?.({ mode: 'system-audio', ownAudioSupported: supported, ownAudioApplied: applied });

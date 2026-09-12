@@ -451,6 +451,21 @@ const bootstrap = async (): Promise<void> => {
   ipcMain.handle('capture:mode', (_event, info: unknown) => {
     const details = (info ?? {}) as { mode?: string; ownAudioSupported?: boolean; ownAudioApplied?: boolean };
     log('page capture mode:', JSON.stringify(details));
+    if (details.mode === 'system-audio-unavailable' && !warnedAboutEcho) {
+      warnedAboutEcho = true;
+      log(
+        'WARNING: this browser/OS cannot exclude the app\'s own audio from system audio, so shares stay ' +
+          'video-only (no echo). On Windows that means Chromium below Windows 11; set SHARKORD_WINDOWS_AUDIO=on ' +
+          'to include system audio anyway — see the README for the per-app output routing workaround.'
+      );
+      if (Notification.isSupported()) {
+        new Notification({
+          title: 'Sharing video only',
+          body: 'This Windows version cannot keep your own audio out of the share, so it stays video-only. Set SHARKORD_WINDOWS_AUDIO=on to include system audio anyway.'
+        }).show();
+      }
+    }
+
     // The page just told us, from the browser's own answer, whether the voice channel is excluded.
     if (details.ownAudioApplied === false && !warnedAboutEcho) {
       warnedAboutEcho = true;

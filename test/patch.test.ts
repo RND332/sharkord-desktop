@@ -189,7 +189,8 @@ describe('getDisplayMedia patch fail-safe', () => {
 describe('getDisplayMedia patch on non-PipeWire platforms', () => {
   const windowsSetup = (
     audioSettings: Record<string, unknown> = {},
-    getUserMedia?: (constraints?: MediaStreamConstraints) => Promise<MediaStream>
+    getUserMedia?: (constraints?: MediaStreamConstraints) => Promise<MediaStream>,
+    supported = true
   ) => {
     const calls: MediaStreamConstraints[] = [];
     const audioTrack = Object.assign(makeTrack('audio'), {
@@ -205,7 +206,7 @@ describe('getDisplayMedia patch on non-PipeWire platforms', () => {
       mediaDevices: {
         getDisplayMedia,
         getUserMedia: getUserMedia ?? (() => Promise.reject(new Error('no loopback device'))),
-        getSupportedConstraints: () => ({ restrictOwnAudio: true })
+        getSupportedConstraints: () => ({ restrictOwnAudio: supported })
       } as unknown as PatchEnvironment['mediaDevices'],
       MediaStream: FakeMediaStream as unknown as PatchEnvironment['MediaStream'],
       MediaStreamTrackGenerator: (() => {}) as unknown as PatchEnvironment['MediaStreamTrackGenerator'],
@@ -274,6 +275,19 @@ describe('getDisplayMedia patch on non-PipeWire platforms', () => {
       ownAudioSupported: true,
       ownAudioApplied: true
     });
+  });
+
+  it('shares video only when the browser cannot exclude our audio', async () => {
+    const { env, calls, reportCaptureMode } = windowsSetup({}, undefined, false);
+
+    const stream = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
+
+    // no system audio requested at all rather than sending the voice channel to the viewers
+    expect(calls).toEqual([{ video: true, audio: false }]);
+    expect(stream).toBeDefined();
+    expect(reportCaptureMode).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: 'system-audio-unavailable', ownAudioSupported: false })
+    );
   });
 
   it('never touches the capture bridge there', async () => {
