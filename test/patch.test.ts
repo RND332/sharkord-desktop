@@ -6,6 +6,7 @@ import {
   type AudioTrackLike,
   type PatchEnvironment
 } from '../src/patch';
+import { isToneHeard } from '../src/patch/echo-test';
 
 type FakeTrack = {
   kind: string;
@@ -42,8 +43,8 @@ class FakeMediaStream {
   getVideoTracks(): FakeTrack[] {
     return this.tracks.filter((t): t is FakeTrack => (t as FakeTrack).kind === 'video');
   }
-  getAudioTracks(): unknown[] {
-    return this.tracks.filter((t) => (t as FakeTrack).kind === 'audio');
+  getAudioTracks(): FakeTrack[] {
+    return this.tracks.filter((t): t is FakeTrack => (t as FakeTrack).kind === 'audio');
   }
 }
 
@@ -63,16 +64,26 @@ const makeAudioData = (writes: WriteRecord[]) =>
     }
   };
 
-const setup = (options: { resolveWrite?: () => Promise<void> } = {}) => {
+type SetupOptions = {
+  resolveWrite?: () => Promise<void>;
+  captureSource?: string;
+  probe?: (track: MediaStreamTrack) => Promise<boolean | null>;
+  forceSystemAudio?: boolean;
+};
+
+const setup = (options: SetupOptions = {}) => {
   const writes: WriteRecord[] = [];
   const pcmCallbacks: Array<(chunk: Uint8Array) => void> = [];
   const videoTrack = makeTrack('video');
-  const originalStream = new FakeMediaStream([videoTrack]) as unknown as MediaStream;
+  const audioTrack = makeTrack('audio');
+  const originalStream = new FakeMediaStream([videoTrack, audioTrack]) as unknown as MediaStream;
   const generatedTracks: Array<FakeTrack & { writable: { getWriter(): { write(d: unknown): Promise<void> } } }> = [];
   let intervalCallback: (() => void) | null = null;
 
   const acquireCapture = vi.fn(async () => {});
   const releaseCapture = vi.fn(async () => {});
+  const reportCaptureMode = vi.fn(async () => true);
+  const probe = vi.fn(options.probe ?? (async () => null));
 
   class FakeGenerator {
     readyState = 'live';
@@ -81,8 +92,7 @@ const setup = (options: { resolveWrite?: () => Promise<void> } = {}) => {
       (this as unknown as { kind: string }).kind = 'audio';
       this.writable = {
         getWriter: () => ({
-          write: () =>
-            options.resolveWrite ? options.resolveWrite() : Promise.resolve()
+          write: () => (options.resolveWrite ? options.resolveWrite() : Promise.resolve())
         })
       };
       generatedTracks.push(this as unknown as (typeof generatedTracks)[number]);
@@ -100,8 +110,12 @@ const setup = (options: { resolveWrite?: () => Promise<void> } = {}) => {
     MediaStream: FakeMediaStream as unknown as PatchEnvironment['MediaStream'],
     MediaStreamTrackGenerator: FakeGenerator as unknown as PatchEnvironment['MediaStreamTrackGenerator'],
     AudioData: makeAudioData(writes) as unknown as PatchEnvironment['AudioData'],
+    probeOwnAudio: probe,
     bridge: {
-      platform: 'linux',
+      platform: 'win32',
+      captureSource: options.captureSource ?? 'windows',
+      forceSystemAudio: options.forceSystemAudio,
+      reportCaptureMode,
       acquireCapture,
       releaseCapture,
       onPcm: (cb) => {
@@ -128,8 +142,11 @@ const setup = (options: { resolveWrite?: () => Promise<void> } = {}) => {
     getDisplayMedia,
     originalStream,
     videoTrack,
+    audioTrack,
     acquireCapture,
     releaseCapture,
+    reportCaptureMode,
+    probe,
     generatedTracks,
     pushPcm: (chunk: Uint8Array) => pcmCallbacks.forEach((cb) => cb(chunk)),
     tick: () => intervalCallback?.(),
@@ -147,169 +164,29 @@ const flush = async (): Promise<void> => {
   for (let i = 0; i < 4; i += 1) await Promise.resolve();
 };
 
-describe('getDisplayMedia patch fail-safe', () => {
-  it('records audio itself when the platform is unknown', async () => {
-    const writes: WriteRecord[] = [];
-    const pcmCallbacks: Array<(chunk: Uint8Array) => void> = [];
-    const original = new FakeMediaStream([makeTrack('video')]) as unknown as MediaStream;
-    const env: PatchEnvironment = {
-      mediaDevices: { getDisplayMedia: vi.fn(async () => original) } as unknown as PatchEnvironment['mediaDevices'],
-      MediaStream: FakeMediaStream as unknown as PatchEnvironment['MediaStream'],
-      MediaStreamTrackGenerator: class {
-        kind = 'audio';
-        readyState = 'live';
-        writable = { getWriter: () => ({ write: () => Promise.resolve() }) };
-        stop(): void {}
-        addEventListener(): void {}
-      } as unknown as PatchEnvironment['MediaStreamTrackGenerator'],
-      AudioData: makeAudioData(writes) as unknown as PatchEnvironment['AudioData'],
-      bridge: {
-        // undefined on purpose: an older preload, a stripped bridge, anything unexpected
-        acquireCapture: vi.fn(async () => {}),
-        releaseCapture: vi.fn(async () => {}),
-        onPcm: (cb) => {
-          pcmCallbacks.push(cb);
-          return () => {};
-        }
-      },
-      log: () => {},
-      setIntervalFn: (() => 0) as unknown as typeof setInterval,
-      clearIntervalFn: (() => {}) as unknown as typeof clearInterval
-    };
-
-    installGetDisplayMediaPatch(env);
-    const stream = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
-
-    // The PipeWire path must win: an unknown platform is not a reason to go silent.
-    expect(env.bridge.acquireCapture).toHaveBeenCalledTimes(1);
-    expect(stream.getAudioTracks()).toHaveLength(1);
+describe('echo verdict from the probe', () => {
+  it('needs a clear tone, not a hopeful noise floor', () => {
+    expect(isToneHeard(-40, -70)).toBe(true); // tone sits 30 dB above the idle band
+    expect(isToneHeard(-66, -70)).toBe(false); // 4 dB: the speakers likely never reproduced it
+    expect(isToneHeard(-95, -110)).toBe(null); // nothing measurable: no verdict either way
+    expect(isToneHeard(Number.NEGATIVE_INFINITY, -70)).toBe(null);
   });
 });
 
-describe('getDisplayMedia patch on non-PipeWire platforms', () => {
-  const windowsSetup = (
-    audioSettings: Record<string, unknown> = {},
-    getUserMedia?: (constraints?: MediaStreamConstraints) => Promise<MediaStream>,
-    supported = true
-  ) => {
-    const calls: MediaStreamConstraints[] = [];
-    const audioTrack = Object.assign(makeTrack('audio'), {
-      getSettings: () => audioSettings
-    });
-    const original = new FakeMediaStream([makeTrack('video'), audioTrack]) as unknown as MediaStream;
-    const getDisplayMedia = vi.fn(async (constraints?: MediaStreamConstraints) => {
-      calls.push(constraints ?? {});
-      return original;
-    });
-    const reportCaptureMode = vi.fn(async () => true);
-    const env: PatchEnvironment = {
-      mediaDevices: {
-        getDisplayMedia,
-        getUserMedia: getUserMedia ?? (() => Promise.reject(new Error('no loopback device'))),
-        getSupportedConstraints: () => ({ restrictOwnAudio: supported })
-      } as unknown as PatchEnvironment['mediaDevices'],
-      MediaStream: FakeMediaStream as unknown as PatchEnvironment['MediaStream'],
-      MediaStreamTrackGenerator: (() => {}) as unknown as PatchEnvironment['MediaStreamTrackGenerator'],
-      AudioData: (() => {}) as unknown as PatchEnvironment['AudioData'],
-      bridge: {
-        platform: 'win32',
-        reportCaptureMode,
-        acquireCapture: vi.fn(async () => {}),
-        releaseCapture: vi.fn(async () => {}),
-        onPcm: () => () => {}
-      },
-      log: () => {}
-    };
-    installGetDisplayMediaPatch(env);
-    return { env, calls, original, getDisplayMedia, reportCaptureMode };
-
-  };
-
-  it('leaves a video-only request untouched', async () => {
-    const { env, calls, original } = windowsSetup({});
+describe('display-media patch: a video-only request changes nothing', () => {
+  it('passes the constraints through untouched', async () => {
+    const env = setup();
     const stream = await env.mediaDevices.getDisplayMedia({ video: true });
 
-    expect(stream).toBe(original);
-    expect(calls).toEqual([{ video: true }]);
-  });
-
-  it('asks Chromium to keep this app out of the captured system audio', async () => {
-    const { env, calls, reportCaptureMode } = windowsSetup();
-    await env.mediaDevices.getDisplayMedia({ video: true, audio: { echoCancellation: false } });
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.video).toBe(true);
-    expect(calls[0]?.audio).toMatchObject({ echoCancellation: false, restrictOwnAudio: true });
-    // so the log and the diagnostics say which strategy actually ran
-    expect(reportCaptureMode).toHaveBeenCalledWith(
-      expect.objectContaining({ mode: 'system-audio' })
-    );
-  });
-
-  it('reports when the browser applied the exclusion', async () => {
-    const { env, reportCaptureMode } = windowsSetup({ restrictOwnAudio: true });
-    await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
-
-    expect(reportCaptureMode).toHaveBeenCalledWith({
-      mode: 'system-audio',
-      ownAudioSupported: true,
-      ownAudioApplied: true
-    });
-  });
-
-  it('prefers the process-excluding loopback device when Windows offers it', async () => {
-    const loopback = Object.assign(makeTrack('audio'), { label: 'loopbackWithoutChrome' });
-    const getUserMedia = vi.fn(async () => new FakeMediaStream([loopback]) as unknown as MediaStream);
-    const { env, calls, reportCaptureMode } = windowsSetup({}, getUserMedia);
-
-    const stream = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
-
-    // the picker is asked for video only: system audio comes from the excluding device
-    expect(calls).toEqual([{ video: true, audio: false }]);
-    expect(getUserMedia).toHaveBeenCalledWith(
-      expect.objectContaining({ audio: expect.objectContaining({ deviceId: { exact: 'loopbackWithoutChrome' } }) })
-    );
-    expect(stream.getAudioTracks()).toHaveLength(1);
-    expect(reportCaptureMode).toHaveBeenCalledWith({
-      mode: 'system-audio-loopback-without-self',
-      ownAudioSupported: true,
-      ownAudioApplied: true
-    });
-  });
-
-  it('shares video only when the browser cannot exclude our audio', async () => {
-    const { env, calls, reportCaptureMode } = windowsSetup({}, undefined, false);
-
-    const stream = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
-
-    // no system audio requested at all rather than sending the voice channel to the viewers
-    expect(calls).toEqual([{ video: true, audio: false }]);
-    expect(stream).toBeDefined();
-    expect(reportCaptureMode).toHaveBeenCalledWith(
-      expect.objectContaining({ mode: 'system-audio-unavailable', ownAudioSupported: false })
-    );
-  });
-
-  it('never touches the capture bridge there', async () => {
-    const { env } = windowsSetup();
-    await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
-
-    expect(env.bridge.acquireCapture).not.toHaveBeenCalled();
+    expect(stream).toBe(env.originalStream);
+    expect(env.getDisplayMedia).toHaveBeenCalledWith({ video: true });
+    expect(env.acquireCapture).not.toHaveBeenCalled();
+    expect(env.reportCaptureMode).not.toHaveBeenCalled();
   });
 });
 
-describe('getDisplayMedia patch', () => {
-  it('leaves a video-only request untouched', async () => {
-    const env = setup();
-    const constraints = { video: true };
-    const stream = await env.mediaDevices.getDisplayMedia(constraints);
-
-    expect(stream).toBe(env.originalStream);
-    expect(env.getDisplayMedia).toHaveBeenCalledWith({ video: true, audio: false });
-    expect(env.acquireCapture).not.toHaveBeenCalled();
-  });
-
-  it('adds the captured audio track when audio was requested', async () => {
+describe('display-media patch: our own capture', () => {
+  it('replaces the browser audio with the captured track', async () => {
     const env = setup();
     const stream = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
 
@@ -318,15 +195,10 @@ describe('getDisplayMedia patch', () => {
     expect(stream.getVideoTracks()[0]).toBe(env.videoTrack);
     expect(stream.getAudioTracks()).toHaveLength(1);
     expect(env.generatedTracks).toHaveLength(1);
-  });
-
-  it('falls back to video only when the capture cannot start', async () => {
-    const env = setup();
-    env.acquireCapture.mockRejectedValueOnce(new Error('parec is dead'));
-    const stream = await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
-
-    expect(stream).toBe(env.originalStream);
-    expect(env.pcmHandlerCount()).toBe(0);
+    // the browser's own system-audio track must not survive into the share
+    expect(env.audioTrack.stopped).toBe(true);
+    expect(env.reportCaptureMode).toHaveBeenCalledWith({ mode: 'captured-pcm' });
+    expect(env.probe).not.toHaveBeenCalled();
   });
 
   it('writes captured PCM as f32 AudioData with a monotonic timestamp', async () => {
@@ -400,5 +272,90 @@ describe('getDisplayMedia patch', () => {
     env.videoTrack.emit('ended');
 
     expect(env.generatedTracks[0]!.readyState).toBe('ended');
+  });
+});
+
+describe('display-media patch: no capture of our own', () => {
+  const noCapture = { captureSource: 'none' as const };
+
+  it('keeps system audio only when the probe cleared it', async () => {
+    const env = setup({ ...noCapture, probe: async () => false });
+    const stream = await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+    expect(env.acquireCapture).not.toHaveBeenCalled();
+    expect(env.probe).toHaveBeenCalledTimes(1);
+    expect(stream).toBe(env.originalStream);
+    expect(env.audioTrack.stopped).toBe(false);
+    expect(env.reportCaptureMode).toHaveBeenCalledWith({ mode: 'system-audio', echoTest: 'clean' });
+  });
+
+  it('drops audio the probe heard this app in', async () => {
+    const env = setup({ ...noCapture, probe: async () => true });
+    const stream = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
+
+    expect(env.audioTrack.stopped).toBe(true);
+    expect(stream.getVideoTracks()).toHaveLength(1);
+    expect(stream.getAudioTracks()).toHaveLength(1); // stopped, so nothing is sent
+    expect(env.reportCaptureMode).toHaveBeenCalledWith({ mode: 'system-audio-echo', echoTest: 'captured' });
+  });
+
+  it('treats an inconclusive probe as echoing', async () => {
+    const env = setup({ ...noCapture, probe: async () => null });
+    await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+    expect(env.audioTrack.stopped).toBe(true);
+    expect(env.reportCaptureMode).toHaveBeenCalledWith({ mode: 'system-audio-unavailable', echoTest: 'unknown' });
+  });
+
+  it('lets an explicit opt-in share unproven audio, but never audio it heard us in', async () => {
+    const forced = setup({ ...noCapture, probe: async () => null, forceSystemAudio: true });
+    await forced.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    expect(forced.audioTrack.stopped).toBe(false);
+    expect(forced.reportCaptureMode).toHaveBeenCalledWith({ mode: 'system-audio', echoTest: 'unknown' });
+
+    const heard = setup({ ...noCapture, probe: async () => true, forceSystemAudio: true });
+    await heard.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    expect(heard.audioTrack.stopped).toBe(true);
+  });
+
+  it('reports when the browser offered no system audio at all', async () => {
+    const env = setup(noCapture);
+    env.getDisplayMedia.mockResolvedValueOnce(
+      new FakeMediaStream([makeTrack('video')]) as unknown as MediaStream
+    );
+
+    const stream = await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+    expect(env.probe).not.toHaveBeenCalled();
+    expect(env.reportCaptureMode).toHaveBeenCalledWith({ mode: 'system-audio-unavailable' });
+    expect((stream as unknown as FakeMediaStream).getVideoTracks()).toHaveLength(1);
+  });
+});
+
+describe('display-media patch fallbacks', () => {
+  it('tries the capture even when the bridge never said it has one', async () => {
+    const env = setup({ captureSource: 'unknown' });
+    const stream = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
+
+    expect(env.acquireCapture).toHaveBeenCalledTimes(1);
+    expect(stream.getAudioTracks()).toHaveLength(1);
+  });
+
+  it('falls back to the probe when the capture cannot start', async () => {
+    const env = setup({ probe: async () => false });
+    env.acquireCapture.mockRejectedValueOnce(new Error('helper is missing'));
+
+    const stream = await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+
+    expect(stream).toBe(env.originalStream);
+    expect(env.pcmHandlerCount()).toBe(0);
+    expect(env.reportCaptureMode).toHaveBeenCalledWith({ mode: 'system-audio', echoTest: 'clean' });
+  });
+
+  it('marks the patched function so the main process can verify it landed', async () => {
+    const env = setup();
+    expect(
+      (env.mediaDevices.getDisplayMedia as unknown as { __sharkordDesktop?: boolean }).__sharkordDesktop
+    ).toBe(true);
   });
 });

@@ -1,6 +1,7 @@
 import { frameInterleavedF32 } from '../shared/pcm';
+import { probeOwnAudio } from './echo-test';
 
-/** Capture format of the PCM the desktop client injects. */
+/** Capture format of the PCM we inject (the Linux tap and the Windows helper both produce this). */
 export const PCM_SAMPLE_RATE = 48000;
 export const PCM_CHANNELS = 2;
 
@@ -15,10 +16,18 @@ export type AudioTrackLike = {
 
 export type AudioDataLike = unknown;
 
+export type EchoTest = 'clean' | 'captured' | 'unknown';
+
+export type CaptureMode =
+  | 'captured-pcm'
+  | 'system-audio'
+  | 'system-audio-echo'
+  | 'system-audio-unavailable'
+  | 'video-only';
+
 export type PatchEnvironment = {
   mediaDevices: {
     getDisplayMedia(constraints?: MediaStreamConstraints): Promise<MediaStream>;
-    getUserMedia?(constraints?: MediaStreamConstraints): Promise<MediaStream>;
   };
   MediaStream: new (tracks?: MediaStreamTrack[]) => MediaStream;
   MediaStreamTrackGenerator: new (init: { kind: 'audio' }) => AudioTrackLike & {
@@ -34,9 +43,14 @@ export type PatchEnvironment = {
   }) => AudioDataLike;
   bridge: {
     platform?: string;
+    /** 'pipewire' | 'windows' | 'none' — where the app's own capture comes from, if anywhere. */
+    captureSource?: string;
+    /** True when the user asked for system audio even where it cannot exclude our playback. */
+    forceSystemAudio?: boolean;
     appInfo?(): Promise<{ version: string; platform: string }>;
     reportCaptureMode?(info: {
-      mode: string;
+      mode: CaptureMode;
+      echoTest?: EchoTest;
       ownAudioSupported?: boolean;
       ownAudioApplied?: boolean;
     }): Promise<boolean>;
@@ -44,15 +58,23 @@ export type PatchEnvironment = {
     releaseCapture(): Promise<void>;
     onPcm(cb: (chunk: Uint8Array) => void): () => void;
   };
+  /** Measures whether the capture can hear this app; overridable for tests. */
+  probeOwnAudio?: (track: MediaStreamTrack) => Promise<boolean | null>;
   log?: (...args: unknown[]) => void;
   setIntervalFn?: typeof setInterval;
   clearIntervalFn?: typeof clearInterval;
 };
 
 /**
- * Replaces `getDisplayMedia` so that a screen share carries PC audio:
- * video comes from the real picker, audio is the PCM captured from the
- * virtual sink (every app except this client).
+ * Replaces `getDisplayMedia` so a screen share carries PC audio without ever carrying the voice
+ * channel back to the people in it:
+ *
+ * 1. our own capture — PipeWire on Linux, a WASAPI process loopback in exclude mode on Windows —
+ *    is injected as an audio track and is echo-free by construction;
+ * 2. otherwise the browser's own system-audio capture is measured: a quiet tone is played through
+ *    the device the app's voice plays on, and if the capture hears it, the audio is dropped;
+ * 3. anything undecidable is treated as echoing, so a share stays video-only rather than sending
+ *    the channel back to its own participants.
  */
 export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
   const log = env.log ?? ((...args: unknown[]) => console.warn('[sharkord-desktop]', ...args));
@@ -60,6 +82,7 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
   const clearIntervalFn = env.clearIntervalFn ?? clearInterval;
   const mediaDevices = env.mediaDevices;
   const originalGetDisplayMedia = mediaDevices.getDisplayMedia.bind(mediaDevices);
+  const probe = env.probeOwnAudio ?? ((track: MediaStreamTrack) => probeOwnAudio(track, { log }));
 
   const createCapturedTrack = async (): Promise<{ track: AudioTrackLike; release(): void }> => {
     const generator = new env.MediaStreamTrackGenerator({ kind: 'audio' });
@@ -115,107 +138,69 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
     return { track: generator, release };
   };
 
-  // Windows and macOS hand the capture to Chromium.
-  const usesPlatformCapture = env.bridge.platform === 'win32' || env.bridge.platform === 'darwin';
-  if (usesPlatformCapture) {
-    /**
-     * Windows can hand us system audio without this app: the `loopbackWithoutChrome` device makes
-     * Chromium open a WASAPI process loopback in EXCLUDE mode for its own process tree, which the OS
-     * has supported since Windows 10 2004. Chromium's `restrictOwnAudio` constraint would do the same
-     * but is gated to Windows 11, so we ask for the device directly and only fall back to the
-     * constraint when it is unavailable.
-     */
-    const captureSystemAudioExcludingSelf = async (): Promise<MediaStreamTrack | null> => {
-      if (env.bridge.platform !== 'win32' || !env.mediaDevices.getUserMedia) return null;
-      try {
-        const stream = await env.mediaDevices.getUserMedia({
-          audio: {
-            deviceId: { exact: 'loopbackWithoutChrome' },
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            channelCount: 2
-          } as MediaTrackConstraints
-        });
-        return stream.getAudioTracks()[0] ?? null;
-      } catch {
-        return null;
-      }
-    };
-
-    mediaDevices.getDisplayMedia = async (
-      constraints: MediaStreamConstraints = {}
-    ): Promise<MediaStream> => {
-      if (!constraints.audio) return originalGetDisplayMedia(constraints);
-
-      // Before asking for system audio at all, find out whether this browser can leave us out of it.
-      // Chromium reports support per platform, and an unsupported constraint is silently dropped —
-      // which would send the voice channel you hear to your viewers.
-      const supported =
-        (env.mediaDevices as { getSupportedConstraints?(): Record<string, unknown> }).getSupportedConstraints?.()
-          ?.restrictOwnAudio === true;
-      const forced = (env.bridge as { forceSystemAudio?: boolean }).forceSystemAudio === true;
-      if (!supported && !forced) {
-        void env.bridge.reportCaptureMode?.({ mode: 'system-audio-unavailable', ownAudioSupported: false });
-        return originalGetDisplayMedia({ video: constraints.video, audio: false });
-      }
-
-      const ownAudioTrack = await captureSystemAudioExcludingSelf();
-      if (ownAudioTrack) {
-        const videoStream = await originalGetDisplayMedia({ video: constraints.video, audio: false });
-        void env.bridge.reportCaptureMode?.({
-          mode: 'system-audio-loopback-without-self',
-          ownAudioSupported: true,
-          ownAudioApplied: true
-        });
-        return new env.MediaStream([...videoStream.getVideoTracks(), ownAudioTrack]);
-      }
-
-      const audio = typeof constraints.audio === 'object' ? constraints.audio : {};
-      // restrictOwnAudio is a Chromium-only display-capture constraint, absent from the DOM types.
-      const audioWithRestriction = { ...audio, restrictOwnAudio: true } as MediaTrackConstraints;
-      const stream = await originalGetDisplayMedia({ ...constraints, audio: audioWithRestriction });
-
-      // Ask the browser whether the exclusion took effect on the track it produced.
-      const applied =
-        (stream.getAudioTracks()[0]?.getSettings?.() as Record<string, unknown> | undefined)?.restrictOwnAudio === true;
-      void env.bridge.reportCaptureMode?.({ mode: 'system-audio', ownAudioSupported: supported, ownAudioApplied: applied });
-      return stream;
-    };
-    return;
-  }
-
-  mediaDevices.getDisplayMedia = async (
-    constraints: MediaStreamConstraints = {}
-  ): Promise<MediaStream> => {
-    const videoStream = await originalGetDisplayMedia({
-      video: constraints.video,
-      audio: false
-    });
-
-    if (!constraints.audio) return videoStream;
+  /** Adds our own captured audio in place of whatever the browser captured; null when unavailable. */
+  const withCapturedAudio = async (stream: MediaStream): Promise<MediaStream | null> => {
+    if (env.bridge.captureSource === 'none') return null;
 
     let injected: { track: AudioTrackLike; release(): void };
     try {
       injected = await createCapturedTrack();
-      void env.bridge.reportCaptureMode?.({ mode: 'pipewire-pcm' });
     } catch (error) {
-      log('system audio capture unavailable, sharing video only', error);
-      return videoStream;
+      log('no system audio capture available, falling back to the browser\'s own', error);
+      return null;
     }
 
-    const stream = new env.MediaStream([
-      ...videoStream.getVideoTracks(),
+    // Whatever the browser handed us is not part of the share: this capture is the whole story.
+    for (const track of stream.getAudioTracks()) track.stop();
+
+    void env.bridge.reportCaptureMode?.({ mode: 'captured-pcm' });
+    const merged = new env.MediaStream([
+      ...stream.getVideoTracks(),
       injected.track as unknown as MediaStreamTrack
     ]);
 
-    const videoTrack = videoStream.getVideoTracks()[0];
+    const videoTrack = stream.getVideoTracks()[0];
     if (videoTrack && typeof videoTrack.addEventListener === 'function') {
       videoTrack.addEventListener('ended', () => {
         injected.track.stop();
       });
     }
+    return merged;
+  };
 
+  mediaDevices.getDisplayMedia = async (
+    constraints: MediaStreamConstraints = {}
+  ): Promise<MediaStream> => {
+    const wantsAudio = Boolean(constraints.audio);
+    const stream = await originalGetDisplayMedia(wantsAudio ? { ...constraints, audio: true } : constraints);
+    if (!wantsAudio) return stream;
+
+    const withOurs = await withCapturedAudio(stream);
+    if (withOurs) return withOurs;
+
+    const audioTracks = stream.getAudioTracks();
+    if (audioTracks.length === 0) {
+      void env.bridge.reportCaptureMode?.({ mode: 'system-audio-unavailable' });
+      return stream;
+    }
+
+    const heard = await probe(audioTracks[0] as unknown as MediaStreamTrack);
+    const forced = env.bridge.forceSystemAudio === true;
+    if (heard === false || (heard === null && forced)) {
+      // Only an explicit opt-in lets audio through when the probe could not clear it; a capture we
+      // measured our own playback in is never shared.
+      if (heard === null) log('including system audio although the echo probe was inconclusive (SHARKORD_WINDOWS_AUDIO=on)');
+      void env.bridge.reportCaptureMode?.({ mode: 'system-audio', echoTest: heard === false ? 'clean' : 'unknown' });
+      return stream;
+    }
+
+    const mode: CaptureMode = heard === true ? 'system-audio-echo' : 'system-audio-unavailable';
+    log(`dropping system audio (${heard === true ? 'it carries our own playback' : 'our own playback could not be ruled out'})`);
+    for (const track of audioTracks) track.stop();
+    void env.bridge.reportCaptureMode?.({ mode, echoTest: heard === true ? 'captured' : 'unknown' });
     return stream;
   };
+
+  // The main process checks this to know the patch really landed, rather than reading source text.
+  Object.defineProperty(mediaDevices.getDisplayMedia, '__sharkordDesktop', { value: true });
 };

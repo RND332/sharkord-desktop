@@ -7,6 +7,8 @@ let holders = 0;
 const bridge = {
   /** The page picks its capture strategy from this. */
   platform: process.platform,
+  /** 'pipewire' | 'windows' | 'none' — whether the app captures share audio itself (from main). */
+  captureSource: (process.argv.find((arg) => arg.startsWith('--sharkord-capture=')) ?? '--sharkord-capture=none').split('=')[1],
   /** SHARKORD_WINDOWS_AUDIO=on: include system audio even where it cannot exclude our own playback. */
   forceSystemAudio: process.env.SHARKORD_WINDOWS_AUDIO === 'on',
   /** Version/platform for the badge the page shows in its corner. */
@@ -14,6 +16,7 @@ const bridge = {
   /** The page reports which capture strategy it installed; it lands in the log. */
   reportCaptureMode: (info: {
     mode: string;
+    echoTest?: string;
     ownAudioSupported?: boolean;
     ownAudioApplied?: boolean;
   }): Promise<boolean> => ipcRenderer.invoke('capture:mode', info),

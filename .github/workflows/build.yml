@@ -37,6 +37,17 @@ jobs:
       - name: Packaging dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libarchive-tools
+      - name: Build the Windows audio helper
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          New-Item -ItemType Directory -Force native\out | Out-Null
+          cl /nologo /std:c++17 /EHsc /O2 /DUNICODE /D_UNICODE native\windows\win-audio-capture.cpp /Fe:native\out\win-audio-capture.exe /link ole32.lib mmdevapi.lib
+          if (-not (Test-Path native\out\win-audio-capture.exe)) { throw 'the audio helper did not build' }
       - name: Package
         run: ${{ matrix.command }}
         env:

@@ -23,25 +23,24 @@ import { pickDisplaySource, registerPickerIpc } from './picker';
 import { normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
 import { runSelftest } from './selftest';
 import { TapCapture } from './tap';
+import { WindowsCapture, helperExists } from './windows-capture';
 import { checkForUpdatesNow, installPendingUpdateSilently, setupAutoUpdates } from './updater';
 import { writeWav } from './wav';
 
 const config = loadConfig();
 
-/**
- * Chromium implements the `restrictOwnAudio` display-capture constraint with Windows' process-tree
- * loopback exclusion, which the OS only exposes from Windows 11 (build 22000) onwards — the check in
- * Chromium is `IsRestrictOwnAudioSupported()`. Before that the constraint is silently ignored.
- */
-const canExcludeOwnAudio = (): boolean => {
-  if (process.platform !== 'win32') return true;
-  const build = Number(osRelease().split('.')[2] ?? 0);
-  return Number.isFinite(build) && build >= 22000;
-};
-
 let warnedAboutEcho = false;
 
 const tap = new TapCapture({ tapName: config.tapName, log });
+
+/**
+ * Windows: the helper activates WASAPI process loopback in exclude mode for our own process tree,
+ * which Chromium itself refuses to do below Windows 11. Everywhere else the PipeWire tap does it.
+ */
+const windowsCapture = process.platform === 'win32' && helperExists() ? new WindowsCapture({ log }) : null;
+const captureSource = windowsCapture ?? (config.mode === 'capture' ? tap : null);
+/** Passed to the page so it knows where share audio comes from. */
+const captureKind = captureSource === windowsCapture ? 'windows' : captureSource ? 'pipewire' : 'none';
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -101,30 +100,33 @@ const installPermissionHandlers = (origin: () => string): void => {
         callback({});
         return;
       }
-      // Windows can hand us system audio; `restrictOwnAudio` (added by the injected patch) keeps
-      // this client's own playback out of it. Set SHARKORD_WINDOWS_AUDIO=off to opt out.
-      const wantsAudio =
-        request.audioRequested && process.platform === 'win32' && process.env.SHARKORD_WINDOWS_AUDIO !== 'off';
-      if (wantsAudio && !canExcludeOwnAudio() && !warnedAboutEcho) {
-        warnedAboutEcho = true;
-        log(
-          `WARNING: ${osRelease()} cannot exclude this app's own playback from system audio ` +
-            '(Chromium needs Windows 11, build 22000+), so viewers will also hear the voice channel you hear. ' +
-            'Set SHARKORD_WINDOWS_AUDIO=off for video-only shares.'
-        );
-      }
+      // With a capture of our own (PipeWire tap or the Windows helper) the browser is never asked
+      // for audio: the page injects our track instead. Without one, Windows system audio is handed
+      // over and the page measures whether it can hear us — SHARKORD_WINDOWS_AUDIO=off skips that.
+      const haveOwnCapture = captureSource !== null;
+      const wantsBrowserAudio =
+        request.audioRequested &&
+        !haveOwnCapture &&
+        process.platform === 'win32' &&
+        process.env.SHARKORD_WINDOWS_AUDIO !== 'off';
       log(
         'screen share source:',
         JSON.stringify({
           name: picked.name,
           of: sources.length,
           picker: wantsSystemPicker ? 'system' : 'in-app',
-          audio: wantsAudio ? 'loopback' : request.audioRequested ? 'ignored' : 'not requested',
-          ownAudioExcluded: wantsAudio ? canExcludeOwnAudio() : undefined,
+          audio: haveOwnCapture
+            ? 'our own capture'
+            : wantsBrowserAudio
+              ? 'browser loopback'
+              : request.audioRequested
+                ? 'unavailable'
+                : 'not requested',
+          helper: windowsCapture ? 'win-audio-capture.exe' : undefined,
           os: process.platform === 'win32' ? osRelease() : undefined
         })
       );
-      callback(wantsAudio ? { video: picked, audio: 'loopback' } : { video: picked });
+      callback(wantsBrowserAudio ? { video: picked, audio: 'loopback' } : { video: picked });
     } catch (error) {
       log('screen share failed:', error);
       callback({});
@@ -135,13 +137,14 @@ const installPermissionHandlers = (origin: () => string): void => {
 const registerIpc = (): void => {
   ipcMain.handle('patch:source', async () => readFile(join(__dirname, 'patch.js'), 'utf8'));
   ipcMain.handle('capture:acquire', () => {
-    if (config.mode !== 'capture') return;
-    tap.start();
+    // Rejecting matters: the page treats a resolved call as "audio is coming".
+    if (!captureSource) throw new Error('this platform has no capture of its own');
+    captureSource.start();
   });
   ipcMain.handle('capture:release', () => {
-    tap.stop();
+    captureSource?.stop();
   });
-  tap.onData((chunk) => {
+  captureSource?.onData((chunk: Buffer) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('pcm', chunk);
     }
@@ -154,7 +157,7 @@ const shutdown = async (code: number, options: { quit?: boolean } = {}): Promise
   shuttingDown = true;
   log(`shutting down (code ${code}${options.quit === false ? ', exiting directly' : ''})`);
   try {
-    tap.stop();
+    captureSource?.stop();
   } catch (error) {
     log('capture stop failed:', error);
   }
@@ -246,7 +249,9 @@ const bootstrap = async (): Promise<void> => {
         sandbox: true,
         nodeIntegration: false,
         autoplayPolicy: 'no-user-gesture-required',
-        backgroundThrottling: false
+        backgroundThrottling: false,
+        // The page reads this to know whether share audio comes from us or the browser.
+        additionalArguments: [`--sharkord-capture=${captureKind}`]
       }
     });
     mainWindow = window;
@@ -398,29 +403,23 @@ const bootstrap = async (): Promise<void> => {
     await target.loadURL(url);
     log('client loaded:', url);
 
-    if (config.mode !== 'capture') return;
-
     // The patch is injected asynchronously from the preload; give it a moment before judging.
     for (let attempt = 0; attempt < 10; attempt += 1) {
       const readiness = (await target.webContents.executeJavaScript(
         `({
           bridge: typeof window.sharkordDesktop,
           platform: window.sharkordDesktop?.platform ?? 'missing',
+          capture: window.sharkordDesktop?.captureSource ?? 'missing',
           badge: document.querySelector('[data-sharkord-desktop-version]')?.textContent ?? 'missing',
-          branch: (() => {
-            const s = String(navigator.mediaDevices?.getDisplayMedia ?? '');
-            if (s.includes('native code')) return 'native';
-            return s.includes('createCapturedTrack') ? 'linux-pcm' : 'passthrough';
-          })(),
-          patched: !String(navigator.mediaDevices?.getDisplayMedia ?? '').includes('native code'),
-          source: String(navigator.mediaDevices?.getDisplayMedia ?? '').slice(0, 200),
+          patched: navigator.mediaDevices?.getDisplayMedia?.__sharkordDesktop === true,
+          source: String(navigator.mediaDevices?.getDisplayMedia ?? '').slice(0, 120),
           generator: typeof MediaStreamTrackGenerator === 'function'
         })`,
         true
       )) as {
         bridge: string;
         platform: string;
-        branch: string;
+        capture: string;
         badge: string;
         patched: boolean;
         source: string;
@@ -428,8 +427,8 @@ const bootstrap = async (): Promise<void> => {
       };
       if (readiness.bridge === 'object' && readiness.patched) {
         log('screen-share audio ready:', JSON.stringify(readiness));
-        if (config.mode === 'capture' && readiness.branch !== 'linux-pcm') {
-          log(`WARNING: expected the PipeWire capture path, got "${readiness.branch}"`);
+        if (readiness.capture !== captureKind) {
+          log(`WARNING: expected the "${captureKind}" capture path, got "${readiness.capture}"`);
           log('injected getDisplayMedia source:', readiness.source);
           if (Notification.isSupported()) {
             new Notification({
@@ -449,35 +448,42 @@ const bootstrap = async (): Promise<void> => {
 
   ipcMain.handle('app:info', () => ({ version: app.getVersion(), platform: process.platform }));
   ipcMain.handle('capture:mode', (_event, info: unknown) => {
-    const details = (info ?? {}) as { mode?: string; ownAudioSupported?: boolean; ownAudioApplied?: boolean };
+    const details = (info ?? {}) as { mode?: string; echoTest?: string };
     log('page capture mode:', JSON.stringify(details));
-    if (details.mode === 'system-audio-unavailable' && !warnedAboutEcho) {
+
+    // A new share always gets its own verdict, so an old warning does not silence a new one.
+    if (details.mode === 'captured-pcm') {
+      warnedAboutEcho = false;
+      return true;
+    }
+
+    if (details.mode === 'system-audio-echo' && !warnedAboutEcho) {
       warnedAboutEcho = true;
       log(
-        'WARNING: this browser/OS cannot exclude the app\'s own audio from system audio, so shares stay ' +
-          'video-only (no echo). On Windows that means Chromium below Windows 11; set SHARKORD_WINDOWS_AUDIO=on ' +
-          'to include system audio anyway — see the README for the per-app output routing workaround.'
+        "WARNING: the system-audio capture provably carried this app's own playback (16 kHz probe, " +
+          `${details.echoTest}), so the share was left silent rather than sending the voice channel back to the channel. ` +
+          'Playing Sharkord through a different device than the one being shared — client Settings → Devices → playback device — ' +
+          'makes system audio usable again.'
       );
       if (Notification.isSupported()) {
         new Notification({
           title: 'Sharing video only',
-          body: 'This Windows version cannot keep your own audio out of the share, so it stays video-only. Set SHARKORD_WINDOWS_AUDIO=on to include system audio anyway.'
+          body: 'Your viewers would have heard themselves, so this share has no sound. Play Sharkord through a different device (Settings → Devices → playback device) to share with audio.'
         }).show();
       }
     }
 
-    // The page just told us, from the browser's own answer, whether the voice channel is excluded.
-    if (details.ownAudioApplied === false && !warnedAboutEcho) {
+    if (details.mode === 'system-audio-unavailable' && !warnedAboutEcho) {
       warnedAboutEcho = true;
       log(
-        `WARNING: this browser/OS does not exclude the app's own audio from the share ` +
-          `(restrictOwnAudio supported: ${details.ownAudioSupported === true}) — viewers will also hear the voice channel. ` +
-          'Server → Show diagnostics… has the details; SHARKORD_WINDOWS_AUDIO=off gives video-only shares.'
+        'WARNING: this share could not prove the captured audio excludes this app, so it stays video-only ' +
+          '(no echo). Check Server → Show diagnostics… for the capture log; playing Sharkord through a device that is ' +
+          'not being shared makes system audio usable again.'
       );
       if (Notification.isSupported()) {
         new Notification({
-          title: 'Viewers will hear the voice channel',
-          body: 'This browser/OS cannot leave your own audio out of the screen share (needs Windows 11). Set SHARKORD_WINDOWS_AUDIO=off for video-only shares.'
+          title: 'Sharing video only',
+          body: 'System audio could not be captured without your own voice in it, so this share has no sound. See Server → Show diagnostics… for details.'
         }).show();
       }
     }

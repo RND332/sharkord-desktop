@@ -17,10 +17,11 @@ and music, never their own voices.
 | Platform | Status |
 |---|---|
 | **Linux + PipeWire** | Full feature — this is what the project is about, verified on Arch/Hyprland/Wayland with Electron 44 |
-| Windows | Client wrapper only: no routing, `getDisplayMedia` is left to Chromium, so screen audio follows the platform (and includes whatever you hear, unless Sharkord's own `restrictOwnAudio` setting handles it). Untested here. |
-| macOS | Same as Windows: wrapper only, untested. Screen audio needs the platform's own permission/support. |
+| **Windows 11 / Server 2022 (build 20348+)** | Full feature — `native/windows/win-audio-capture.cpp` captures the default output in WASAPI exclude mode for our own process tree, bypassing Chromium's build-22000 gate. Built and shipped in the Windows package; verified by CI build + the runtime probe. |
+| **Windows 10 (≤19045)** | Video, plus system audio only when the app can *prove* the capture does not contain its own playback (see Known limits). The supported way to get audio: point Sharkord at a second output device and share the other one. |
+| macOS | Wrapper only, untested. No own capture: the share carries whatever the platform gives `getDisplayMedia`, after the same proof. |
 
-Builds for all three platforms are produced by CI; only the Linux build can do the audio exclusion.
+Builds for all three platforms are produced by CI.
 
 ## Install
 
@@ -59,6 +60,11 @@ this app's own playback is never linked ──► viewers never hear themselves
    absent from the capture.
 4. The captured PCM is injected as a real audio track into a main-world patch of `getDisplayMedia`,
    and the stock Sharkord client publishes it as its usual `SCREEN_AUDIO` producer.
+
+On Windows the same patch runs, but the PCM comes from `native/windows/win-audio-capture.exe` (WASAPI
+process loopback, exclude mode, our process tree) where the OS offers it; where it does not, the share
+falls back to Chromium's system audio and is only kept if a 16 kHz probe proves this app's playback is
+not in it. Either way the client publishes the track exactly as on Linux.
 
 Closing the window keeps the app in the tray (capture and voice stay connected) and says so once.
 Quit from the **Quit Sharkord** tray item, the Server menu, or with Ctrl/Cmd+Q — all three paths are
@@ -99,6 +105,7 @@ startup and every time you pick **Server → Check for updates…**:
 |---|---|---|
 | `SHARKORD_URL` | — (asks on first run) | web client to load (`--url=` also works; both beat the stored server) |
 | `SHARKORD_TAP_NAME` | `sharkord_capture` | name of the recording node other apps are linked into |
+| `SHARKORD_WINDOWS_AUDIO` | — | `on`: share system audio even when the echo probe was inconclusive (never when it heard this app); `off`: never use the browser's system audio |
 | `SHARKORD_DEBUG_PCM` | — | dump the recorded PCM to this WAV path while streaming |
 | `SHARKORD_DEBUG_QUIT_AFTER` | — | seconds after startup, run the tray's quit path (regression test) |
 | `SHARKORD_DEBUG_APP_QUIT_AFTER` | — | seconds after startup, call `app.quit()` like Ctrl+Q does |
@@ -141,21 +148,34 @@ asks the user:
 
 ## Known limits
 
-- **Windows audio, precisely**: Chromium implements the exclusion with Windows' WASAPI *process
-  loopback in exclude mode* (`PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE`, see
-  `media/audio/win/audio_low_latency_input_win.cc`), but gates it with `IsRestrictOwnAudioSupported()`
-  to **Windows 11 (build 22000)**. Microsoft documents the underlying
-  [`AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS`](https://learn.microsoft.com/en-us/windows/win32/api/audioclientactivationparams/ns-audioclientactivationparams-audioclient_process_loopback_params)
-  as requiring **build 20348**, so on a Windows 10 22H2 machine (19045) the exclusion is not available
-  to any Chromium-based client. The app therefore requests system audio only after the browser says it
-  supports the exclusion (`getSupportedConstraints().restrictOwnAudio`) and verifies the track's own
-  settings afterwards; otherwise it shares video only and says so.
-  `SHARKORD_WINDOWS_AUDIO=on` forces system audio anyway (it will echo the voice channel).
+- **Windows audio, precisely**: per Microsoft, WASAPI *process loopback in exclude mode*
+  ([`PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE`](https://learn.microsoft.com/en-us/windows/win32/api/audioclientactivationparams/ne-audioclientactivationparams-process_loopback_mode))
+  needs **Windows 10 build 20348**, and Microsoft's own
+  [Application loopback sample](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/)
+  repeats that floor ("requires Windows 10 build 20348 or later"). Windows 10 *clients* stop at 19045,
+  so no Windows 10 machine can capture "everything except one app" — not through Chromium, whose
+  `IsRestrictOwnAudioSupported()` additionally gates it at build 22000
+  (`services/audio/loopback_mixin.cc`), and not through native code either. Discord has no such
+  feature: their community's answer to "filter out voice call audio when screen sharing" is *"the only
+  solution would be to set up a virtual audio cable"*, and users report that sharing system audio
+  "also shares the audio of discord".
 
-  **Workaround that works on any Windows 10**: give the client its own output device. Windows can route
-  one application to another device (Settings → System → Sound → Volume mixer): point Sharkord at your
-  headphones and leave everything else on the speakers, then share the speakers' screen — the capture
-  contains the games and music but not the voices you hear in the headphones.
+  So the app does two things instead:
+  1. **Windows 11 / Server 2022 (build 20348+)**: `native/windows/win-audio-capture.cpp` calls
+     `ActivateAudioInterfaceAsync` with exclude mode for our own process tree, bypassing Chromium's
+     version gate, and its PCM is what the share carries. Echo-free by construction, zero setup.
+  2. **Anything else**: system audio is only shared if it is *proven* not to contain this app. The app
+     plays a 16 kHz tone at −24 dBFS through the same device your voice plays on and listens for it in
+     the capture. Heard, or not provably absent → the share stays video-only and says why. Measured on
+     real hardware: idle band −115 dB, tone −24 dB, against an 8 dB threshold.
+     `SHARKORD_WINDOWS_AUDIO=on` lets *unproven* audio through — never audio the probe heard.
+
+  **The fix that makes audio work on any Windows**: give Sharkord its own output device, which the
+  client already supports (`Settings → Devices → playback device` → `applyAudioOutputDevice` →
+  `HTMLMediaElement.setSinkId`). Point Sharkord at your headphones and leave everything else on the
+  speakers, then share the speakers: the capture carries games and music, not the voices in your
+  headphones. This is the same split Discord users achieve by setting Discord's output device to their
+  headphones.
 - macOS gets video through the picker, no system audio.
 - Another instance of this app on the same machine is a separate application: its playback is captured
   by design, which is why the self test notes it and skips the tone-based leak check while it runs.
