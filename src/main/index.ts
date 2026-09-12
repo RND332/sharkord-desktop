@@ -149,10 +149,10 @@ const registerIpc = (): void => {
   });
 };
 
-const shutdown = async (code: number): Promise<void> => {
+const shutdown = async (code: number, options: { quit?: boolean } = {}): Promise<void> => {
   if (shuttingDown) return;
   shuttingDown = true;
-  log(`shutting down (code ${code})`);
+  log(`shutting down (code ${code}${options.quit === false ? ', exiting directly' : ''})`);
   try {
     tap.stop();
   } catch (error) {
@@ -499,6 +499,13 @@ const bootstrap = async (): Promise<void> => {
     }
   });
 
+  if (process.env.SHARKORD_DEBUG_QUIT_AFTER) {
+    setTimeout(() => void shutdown(0), Number(process.env.SHARKORD_DEBUG_QUIT_AFTER) * 1000);
+  }
+  if (process.env.SHARKORD_DEBUG_APP_QUIT_AFTER) {
+    setTimeout(() => app.quit(), Number(process.env.SHARKORD_DEBUG_APP_QUIT_AFTER) * 1000);
+  }
+
   const startUrl = config.url ?? readServerUrl(serverConfigPath);
   if (startUrl) {
     await loadClient(startUrl);
@@ -518,8 +525,13 @@ if (!app.requestSingleInstanceLock()) {
     mainWindow.focus();
   });
 
+  app.on('before-quit', () => log('event: before-quit'));
+  app.on('will-quit', () => log('event: will-quit'));
+  app.on('quit', () => log('event: quit'));
+
   // With a tray icon around, losing the window must not quit the app.
   app.on('window-all-closed', () => {
+    log('event: window-all-closed');
     if (tray && !shuttingDown) return;
     void shutdown(0);
   });
@@ -527,11 +539,12 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', (event) => {
     if (shuttingDown) return;
     event.preventDefault();
-    void shutdown(0);
+    // We just cancelled this quit, so we must finish the job ourselves.
+    void shutdown(0, { quit: false });
   });
 
-  process.on('SIGINT', () => void shutdown(0));
-  process.on('SIGTERM', () => void shutdown(0));
+  process.on('SIGINT', () => void shutdown(0, { quit: false }));
+  process.on('SIGTERM', () => void shutdown(0, { quit: false }));
 
   app.whenReady().then(bootstrap).catch((error) => {
     log('startup failed:', error);

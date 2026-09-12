@@ -1,6 +1,6 @@
 {
   "name": "sharkord-desktop",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "private": true,
   "description": "Sharkord desktop client whose screen share carries the whole PC's audio except Sharkord itself",
   "author": "Talgat Minigaliev <https://github.com/RND332>",

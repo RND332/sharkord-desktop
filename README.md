@@ -60,8 +60,9 @@ this app's own playback is never linked ──► viewers never hear themselves
 4. The captured PCM is injected as a real audio track into a main-world patch of `getDisplayMedia`,
    and the stock Sharkord client publishes it as its usual `SCREEN_AUDIO` producer.
 
-Closing the window keeps the app in the tray (capture and voice stay connected) and says so once;
-quit from the **Quit Sharkord** tray item or the Server menu. A downloaded update is swapped in on
+Closing the window keeps the app in the tray (capture and voice stay connected) and says so once.
+Quit from the **Quit Sharkord** tray item, the Server menu, or with Ctrl/Cmd+Q — all three paths are
+verified in CI-less local tests via `SHARKORD_DEBUG_QUIT_AFTER` / `SHARKORD_DEBUG_APP_QUIT_AFTER`. A downloaded update is swapped in on
 the way out **without** relaunching the app, so quitting really quits — set
 `SHARKORD_UPDATE_NO_PROMPT=1` to skip the restart prompt entirely.
 
@@ -99,6 +100,8 @@ startup and every time you pick **Server → Check for updates…**:
 | `SHARKORD_URL` | — (asks on first run) | web client to load (`--url=` also works; both beat the stored server) |
 | `SHARKORD_TAP_NAME` | `sharkord_capture` | name of the recording node other apps are linked into |
 | `SHARKORD_DEBUG_PCM` | — | dump the recorded PCM to this WAV path while streaming |
+| `SHARKORD_DEBUG_QUIT_AFTER` | — | seconds after startup, run the tray's quit path (regression test) |
+| `SHARKORD_DEBUG_APP_QUIT_AFTER` | — | seconds after startup, call `app.quit()` like Ctrl+Q does |
 
 ## Verification
 
