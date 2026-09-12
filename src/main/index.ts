@@ -172,7 +172,7 @@ const shutdown = async (code: number, options: { quit?: boolean } = {}): Promise
 
   if (code === 0) {
     // A downloaded update is swapped in on the way out — silently, and without relaunching.
-    if (installPendingUpdateSilently()) {
+    if (installPendingUpdateSilently(log)) {
       log('installing the downloaded update on the way out');
       return;
     }

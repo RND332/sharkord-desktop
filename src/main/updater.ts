@@ -1,3 +1,4 @@
+import { copyFileSync, existsSync } from 'node:fs';
 import { app, dialog } from 'electron';
 import { autoUpdater } from 'electron-updater';
 
@@ -77,8 +78,22 @@ export const setupAutoUpdates = (hooks: UpdaterHooks): void => {
  * Replaces the installed app with a downloaded update without relaunching it, so an explicit quit
  * really quits. Returns false when there is nothing to install.
  */
-export const installPendingUpdateSilently = (): boolean => {
+export const installPendingUpdateSilently = (
+  log: (...parts: unknown[]) => void = () => {}
+): boolean => {
   if (pendingVersion === null) return false;
+
+  // The AppImage updater removes the running image before moving the new one in; if that window is
+  // interrupted the app would be left without a binary. Keep a copy the launcher can restore.
+  const image = process.env.APPIMAGE;
+  if (image) {
+    try {
+      if (!existsSync(`${image}.bak`)) copyFileSync(image, `${image}.bak`);
+    } catch (error) {
+      log('could not back up the AppImage before updating:', error);
+    }
+  }
+
   autoUpdater.quitAndInstall(true, false);
   return true;
 };
