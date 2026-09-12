@@ -7,6 +7,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  Notification,
   session,
   Tray
 } from 'electron';
@@ -21,7 +22,7 @@ import { pickDisplaySource, registerPickerIpc } from './picker';
 import { normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
 import { runSelftest } from './selftest';
 import { TapCapture } from './tap';
-import { checkForUpdatesNow, setupAutoUpdates } from './updater';
+import { checkForUpdatesNow, installPendingUpdateSilently, setupAutoUpdates } from './updater';
 import { writeWav } from './wav';
 
 const config = loadConfig();
@@ -126,6 +127,7 @@ const registerIpc = (): void => {
 const shutdown = async (code: number): Promise<void> => {
   if (shuttingDown) return;
   shuttingDown = true;
+  log(`shutting down (code ${code})`);
   try {
     tap.stop();
   } catch (error) {
@@ -144,7 +146,11 @@ const shutdown = async (code: number): Promise<void> => {
   }
 
   if (code === 0) {
-    // A normal quit goes through app.quit() so a downloaded update can install on the way out.
+    // A downloaded update is swapped in on the way out — silently, and without relaunching.
+    if (installPendingUpdateSilently()) {
+      log('installing the downloaded update on the way out');
+      return;
+    }
     app.quit();
     return;
   }
@@ -176,11 +182,20 @@ const bootstrap = async (): Promise<void> => {
     window.webContents.on('preload-error', (_event, path, error) => {
       log('preload failed:', path, error);
     });
+    let mentionedTray = false;
     window.on('close', (event) => {
       if (shuttingDown) return;
       log('window closed, staying in the tray');
       event.preventDefault();
       window.hide();
+      if (!mentionedTray && Notification.isSupported()) {
+        mentionedTray = true;
+        log('telling the user the app is still in the tray');
+        new Notification({
+          title: 'Sharkord is still running',
+          body: 'Closing the window keeps it in the tray. Quit from the tray menu.'
+        }).show();
+      }
     });
     window.on('closed', () => {
       mainWindow = null;
@@ -245,11 +260,20 @@ const bootstrap = async (): Promise<void> => {
     );
     tray.on('click', showWindow);
 
+    let mentionedTray = false;
     window.on('close', (event) => {
       if (shuttingDown) return;
       log('window closed, staying in the tray');
       event.preventDefault();
       window.hide();
+      if (!mentionedTray && Notification.isSupported()) {
+        mentionedTray = true;
+        log('telling the user the app is still in the tray');
+        new Notification({
+          title: 'Sharkord is still running',
+          body: 'Closing the window keeps it in the tray. Quit from the tray menu.'
+        }).show();
+      }
     });
   } catch (error) {
     log('no system tray available, closing the window will quit:', error);

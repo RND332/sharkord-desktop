@@ -60,8 +60,10 @@ this app's own playback is never linked ──► viewers never hear themselves
 4. The captured PCM is injected as a real audio track into a main-world patch of `getDisplayMedia`,
    and the stock Sharkord client publishes it as its usual `SCREEN_AUDIO` producer.
 
-Closing the window keeps the app in the tray (capture and voice stay connected); quit from the tray
-menu or with Ctrl/Cmd+Q.
+Closing the window keeps the app in the tray (capture and voice stay connected) and says so once;
+quit from the **Quit Sharkord** tray item or the Server menu. A downloaded update is swapped in on
+the way out **without** relaunching the app, so quitting really quits — set
+`SHARKORD_UPDATE_NO_PROMPT=1` to skip the restart prompt entirely.
 
 ## Usage
 

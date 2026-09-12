@@ -1,6 +1,8 @@
 import { app, dialog } from 'electron';
 import { autoUpdater } from 'electron-updater';
 
+let pendingVersion: string | null = null;
+
 export type UpdaterHooks = {
   log: (...parts: unknown[]) => void;
   /** Called just before the app is restarted into the new version. */
@@ -35,7 +37,8 @@ export const setupAutoUpdates = (hooks: UpdaterHooks): void => {
   } as unknown as typeof autoUpdater.logger;
 
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // Never install behind the user's back: that relaunches the app and looks like "it will not close".
+  autoUpdater.autoInstallOnAppQuit = false;
 
   autoUpdater.on('checking-for-update', () => log('checking for updates'));
   autoUpdater.on('update-not-available', () => log('no update available'));
@@ -43,7 +46,12 @@ export const setupAutoUpdates = (hooks: UpdaterHooks): void => {
     log(`update check failed: ${error?.message ?? String(error)}`);
   });
   autoUpdater.on('update-downloaded', (info) => {
+    pendingVersion = info.version;
     log(`update downloaded: ${info.version}`);
+    if (process.env.SHARKORD_UPDATE_NO_PROMPT === '1') {
+      log('not prompting: the update installs silently on quit');
+      return;
+    }
     void (async () => {
       const { response } = await dialog.showMessageBox({
         type: 'info',
@@ -63,6 +71,16 @@ export const setupAutoUpdates = (hooks: UpdaterHooks): void => {
   void autoUpdater.checkForUpdates().catch((error: Error) => {
     log(`update check failed: ${error?.message ?? String(error)}`);
   });
+};
+
+/**
+ * Replaces the installed app with a downloaded update without relaunching it, so an explicit quit
+ * really quits. Returns false when there is nothing to install.
+ */
+export const installPendingUpdateSilently = (): boolean => {
+  if (pendingVersion === null) return false;
+  autoUpdater.quitAndInstall(true, false);
+  return true;
 };
 
 /** Menu action: check on demand and say what happened. */
