@@ -48,7 +48,7 @@ class ActivationHandler final
  public:
   explicit ActivationHandler(HANDLE done) : done_(done) {}
 
-  IFACEMETHODIMP ActivateCompleted(IActivateAudioInterfaceAsyncOperation* operation) override {
+  HRESULT STDMETHODCALLTYPE ActivateCompleted(IActivateAudioInterfaceAsyncOperation* operation) override {
     HRESULT activate_result = E_FAIL;
     ComPtr<IUnknown> activated;
     if (operation != nullptr) {
