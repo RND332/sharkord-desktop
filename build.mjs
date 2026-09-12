@@ -1,4 +1,5 @@
 import { build } from 'esbuild';
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { copyFile, mkdir, rm } from 'node:fs/promises';
 
@@ -8,6 +9,12 @@ const shared = {
   logLevel: 'info',
   target: 'node22'
 };
+
+if (process.platform === 'win32') {
+  execFileSync('powershell.exe', ['-NoProfile', '-File', 'scripts/build-windows-audio.ps1'], {
+    stdio: 'inherit'
+  });
+}
 
 await rm('dist', { recursive: true, force: true });
 await mkdir('dist', { recursive: true });

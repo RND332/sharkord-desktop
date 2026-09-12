@@ -1,15 +1,35 @@
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
 
-type PcmHandler = (event: unknown, chunk: Uint8Array) => void;
+type PcmHandler = (event: unknown, chunk: Uint8Array, sessionId?: number) => void;
 
 let holders = 0;
+let acquiring: Promise<number | null> | null = null;
+let session: number | null = null;
+let sessionEnded = false;
+let endedThrough = 0;
+const endedListeners = new Set<() => void>();
+
+const notifyEnded = (): void => {
+  for (const listener of endedListeners) listener();
+};
+
+ipcRenderer.on('capture:ended', ((_event: unknown, sessionId?: number) => {
+  if (typeof sessionId !== 'number') {
+    notifyEnded();
+    return;
+  }
+  if (sessionId <= endedThrough) return;
+  endedThrough = sessionId;
+  if (sessionId !== session) return;
+  sessionEnded = true;
+  notifyEnded();
+}) as never);
 
 const bridge = {
   /** The page picks its capture strategy from this. */
   platform: process.platform,
   /** 'pipewire' | 'windows' | 'none' — whether the app captures share audio itself (from main). */
   captureSource: (process.argv.find((arg) => arg.startsWith('--sharkord-capture=')) ?? '--sharkord-capture=none').split('=')[1],
-  /** SHARKORD_WINDOWS_AUDIO=on: include system audio even where it cannot exclude our own playback. */
   forceSystemAudio: process.env.SHARKORD_WINDOWS_AUDIO === 'on',
   /** Version/platform for the badge the page shows in its corner. */
   appInfo: (): Promise<{ version: string; platform: string }> => ipcRenderer.invoke('app:info'),
@@ -28,18 +48,52 @@ const bridge = {
   pickerSources: (): Promise<unknown> => ipcRenderer.invoke('picker:sources'),
   pickerChoose: (id: string | null): Promise<boolean> => ipcRenderer.invoke('picker:choose', id),
   acquireCapture: async (): Promise<void> => {
-    if (holders === 0) await ipcRenderer.invoke('capture:acquire');
+    if (holders === 0) {
+      acquiring ??= ipcRenderer
+        .invoke('capture:acquire')
+        .then((sessionId: unknown): number | null => {
+          if (typeof sessionId === 'number' && sessionId <= endedThrough) {
+            throw new Error('capture ended while it was being acquired');
+          }
+          return typeof sessionId === 'number' ? sessionId : null;
+        })
+        .finally(() => {
+          acquiring = null;
+        });
+      try {
+        session = await acquiring;
+        sessionEnded = false;
+      } catch (error) {
+        session = null;
+        sessionEnded = false;
+        throw error;
+      }
+    }
     holders += 1;
   },
   releaseCapture: async (): Promise<void> => {
     holders = Math.max(0, holders - 1);
-    if (holders === 0) await ipcRenderer.invoke('capture:release');
+    if (holders > 0) return;
+    const releasing = session;
+    session = null;
+    sessionEnded = false;
+    await ipcRenderer.invoke('capture:release', releasing ?? undefined);
   },
   onPcm: (callback: (chunk: Uint8Array) => void): (() => void) => {
-    const handler: PcmHandler = (_event, chunk) => callback(new Uint8Array(chunk));
+    const handler: PcmHandler = (_event, chunk, sessionId) => {
+      if (session !== null ? sessionId !== session : typeof sessionId === 'number') return;
+      callback(new Uint8Array(chunk));
+    };
     ipcRenderer.on('pcm', handler as never);
     return () => {
       ipcRenderer.off('pcm', handler as never);
+    };
+  },
+  onCaptureEnded: (callback: () => void): (() => void) => {
+    endedListeners.add(callback);
+    if (session !== null && sessionEnded) callback();
+    return () => {
+      endedListeners.delete(callback);
     };
   }
 };
@@ -47,8 +101,6 @@ const bridge = {
 contextBridge.exposeInMainWorld('sharkordDesktop', bridge);
 console.log('[sharkord-desktop] preload ready, bridge exposed');
 
-// Linux gets PCM injected from PipeWire; Windows and macOS only add `restrictOwnAudio` so the
-// system audio Chromium captures leaves out this client's own playback.
 void (async () => {
   try {
     const source = (await ipcRenderer.invoke('patch:source')) as string;

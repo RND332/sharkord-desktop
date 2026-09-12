@@ -17,8 +17,7 @@ and music, never their own voices.
 | Platform | Status |
 |---|---|
 | **Linux + PipeWire** | Full feature — this is what the project is about, verified on Arch/Hyprland/Wayland with Electron 44 |
-| **Windows 11 / Server 2022 (build 20348+)** | Full feature — `native/windows/win-audio-capture.cpp` captures the default output in WASAPI exclude mode for our own process tree, bypassing Chromium's build-22000 gate. Compiled in CI and shipped inside the Windows package as `resources/native/win-audio-capture.exe`; not yet run on a real Windows 11 machine. |
-| **Windows 10 (≤19045)** | Video, plus system audio only when the app can *prove* the capture does not contain its own playback (see Known limits). The supported way to get audio: point Sharkord at a second output device and share the other one. |
+| **Windows** | Native process-loopback capture: screen shares exclude Sharkord's process tree; window shares include only the selected application's process tree. Availability is determined by native activation, not a Windows-version gate. Windows audio measurements are still required; a successful build alone does not prove isolation. |
 | macOS | Wrapper only, untested. No own capture: the share carries whatever the platform gives `getDisplayMedia`, after the same proof. |
 
 Builds for all three platforms are produced by CI.
@@ -61,10 +60,12 @@ this app's own playback is never linked ──► viewers never hear themselves
 4. The captured PCM is injected as a real audio track into a main-world patch of `getDisplayMedia`,
    and the stock Sharkord client publishes it as its usual `SCREEN_AUDIO` producer.
 
-On Windows the same patch runs, but the PCM comes from `native/windows/win-audio-capture.exe` (WASAPI
-process loopback, exclude mode, our process tree) where the OS offers it; where it does not, the share
-falls back to Chromium's system audio and is only kept if a 16 kHz probe proves this app's playback is
-not in it. Either way the client publishes the track exactly as on Linux.
+On Windows the PCM comes from `native/windows/win-audio-capture.exe`. A screen selects WASAPI
+process-loopback **exclude** mode for Sharkord's process tree; a window selects **include** mode for
+the process owning the chosen HWND. Process loopback spans playback endpoints, rather than capturing
+only the default device. A `READY` acknowledgement confirms startup even when the selected app is
+silent. Missing or failed native capture leaves the share video-only: Windows never falls back to
+Chromium's whole-system loopback or uses a short tone probe as a substitute for isolation.
 
 Closing the window keeps the app in the tray (capture and voice stay connected) and says so once.
 Quit from the **Quit Sharkord** tray item, the Server menu, or with Ctrl/Cmd+Q — all three paths are
@@ -78,10 +79,21 @@ the way out **without** relaunching the app, so quitting really quits — set
 bun install
 bun run start          # build + launch
 bun run test           # unit tests
-bun run selftest       # proves the app's own audio is excluded from the capture
+bun run selftest       # Linux: real display-media patch, PCM injection and tone-exclusion check
 bun run dist:linux     # packaged builds (dist:win, dist:mac on those hosts)
 bun run build && electron . --cleanup   # remove the virtual sink an older version left behind
 ```
+
+On Windows, install the Visual Studio C++ build tools and Windows SDK:
+
+```powershell
+bun run build:windows-audio
+bun run test:windows-audio
+bun run dist:win
+```
+
+`dist:win` builds the helper before packaging and fails if compilation fails, rather than silently
+producing a Windows client without native audio capture.
 
 `scripts/install-local.sh` installs the app for the current user without root: it takes the Linux
 AppImage from the latest GitHub release into `~/.local/opt`, puts `sharkord-desktop` on `PATH` and
@@ -105,32 +117,45 @@ startup and every time you pick **Server → Check for updates…**:
 |---|---|---|
 | `SHARKORD_URL` | — (asks on first run) | web client to load (`--url=` also works; both beat the stored server) |
 | `SHARKORD_TAP_NAME` | `sharkord_capture` | name of the recording node other apps are linked into |
-| `SHARKORD_WINDOWS_AUDIO` | — | `on`: share system audio even when the echo probe was inconclusive (never when it heard this app); `off`: never use the browser's system audio |
+| `SHARKORD_WINDOWS_AUDIO` | — | Legacy `on` override for inconclusive browser-audio probes on non-Windows platforms. Ignored on Windows: native isolation cannot be bypassed. |
 | `SHARKORD_DEBUG_PCM` | — | dump the recorded PCM to this WAV path while streaming |
 | `SHARKORD_DEBUG_QUIT_AFTER` | — | seconds after startup, run the tray's quit path (regression test) |
 | `SHARKORD_DEBUG_APP_QUIT_AFTER` | — | seconds after startup, call `app.quit()` like Ctrl+Q does |
 
 ## Verification
 
-`bun run selftest` plays a 997 Hz tone *inside the app window* and a 1493 Hz tone from an unrelated
-process (launched with `setsid`, so it looks like any other application), then measures three signals
-(last run, 2026-09-12):
+`bun run selftest` on Linux plays a 997 Hz tone *inside the app window* and a 1493 Hz tone from an
+unrelated process, then measures the tap, the real patched `getDisplayMedia` audio track and a
+hardware-monitor positive control (last run, 2026-09-13):
 
 | signal | another app's tone (must be captured) | the client's own tone (must not leak) |
 |---|---|---|
 | the tap (`pw-record` node with linked streams) | `0.350` | `0.000` |
-| injected track read back in the renderer | `0.350` | `0.001` |
+| injected track read back in the renderer | `0.350` | `0.000` |
 | hardware monitor (control) | — | `0.350` |
 
-The third row proves the tone really played; the middle row proves the track handed to the client
-carries it. Both tone levels are exactly the amplitude that was played (0.35), and the same run
-asserts that the default sink, the module list and the sink list are untouched.
+The control proves the app tone really played. The middle row exercises the production display-media
+patch over a local canvas video source, rather than a duplicate PCM writer. This is a Linux/renderer
+regression check, **not Windows WASAPI or a remote viewer verification**.
 
 `bun run test` covers the PipeWire graph parsing (node ids, port directions, `pw-dump` shapes), the
 link planner (mono fan-out, own-process exclusion, idempotency, links forgotten when a stream
 disappears), the PCM framing (byte-exact carry, per-channel RMS, Goertzel selectivity), patch
 behaviour (passthrough, merge, fallback, backpressure, release), the server configuration (URL
 normalisation, hostile configs, storage round-trip) and the platform mode.
+
+`bun run test:windows-audio` is the separate real-Windows proof. Three independent application
+windows own child processes playing 997, 1493 and 2137 Hz tones. The script measures both PCM
+channels for screen exclusion, window inclusion, silent startup followed by resumed playback, and
+refused own/dead window targets. No playback device or missing desired audio is a failure, not a
+passing silent capture. It changes no playback-device routing and removes its temporary fixtures.
+Run it on the affected Windows machine before treating isolation as verified.
+
+The Windows CI artifact `windows-audio-verification` contains the compiled helper and this script,
+so the sound check does not require Bun or Visual Studio: extract it and run
+`powershell -NoProfile -File .\scripts\windows-audio-smoke.ps1` from the extracted directory.
+CI itself runs `-CheckOnly` to compile the fixture and check rejected arguments without starting
+audio. That check explicitly reports **audio not tested**.
 
 Electron has no screen picker of its own — `getDisplayMedia` rejects with `NotSupportedError` unless
 the app installs `setDisplayMediaRequestHandler`, and that handler must name the source. So the app
@@ -148,34 +173,19 @@ asks the user:
 
 ## Known limits
 
-- **Windows audio, precisely**: per Microsoft, WASAPI *process loopback in exclude mode*
-  ([`PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE`](https://learn.microsoft.com/en-us/windows/win32/api/audioclientactivationparams/ne-audioclientactivationparams-process_loopback_mode))
-  needs **Windows 10 build 20348**, and Microsoft's own
-  [Application loopback sample](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/)
-  repeats that floor ("requires Windows 10 build 20348 or later"). Windows 10 *clients* stop at 19045,
-  so no Windows 10 machine can capture "everything except one app" — not through Chromium, whose
-  `IsRestrictOwnAudioSupported()` additionally gates it at build 22000
-  (`services/audio/loopback_mixin.cc`), and not through native code either. Discord has no such
-  feature: their community's answer to "filter out voice call audio when screen sharing" is *"the only
-  solution would be to set up a virtual audio cable"*, and users report that sharing system audio
-  "also shares the audio of discord".
-
-  So the app does two things instead:
-  1. **Windows 11 / Server 2022 (build 20348+)**: `native/windows/win-audio-capture.cpp` calls
-     `ActivateAudioInterfaceAsync` with exclude mode for our own process tree, bypassing Chromium's
-     version gate, and its PCM is what the share carries. Echo-free by construction, zero setup.
-  2. **Anything else**: system audio is only shared if it is *proven* not to contain this app. The app
-     plays a 16 kHz tone at −24 dBFS through the same device your voice plays on and listens for it in
-     the capture. Heard, or not provably absent → the share stays video-only and says why. Measured on
-     real hardware: idle band −115 dB, tone −24 dB, against an 8 dB threshold.
-     `SHARKORD_WINDOWS_AUDIO=on` lets *unproven* audio through — never audio the probe heard.
-
-  **The fix that makes audio work on any Windows**: give Sharkord its own output device, which the
-  client already supports (`Settings → Devices → playback device` → `applyAudioOutputDevice` →
-  `HTMLMediaElement.setSinkId`). Point Sharkord at your headphones and leave everything else on the
-  speakers, then share the speakers: the capture carries games and music, not the voices in your
-  headphones. This is the same split Discord users achieve by setting Discord's output device to their
-  headphones.
+- **Windows availability**: Microsoft's
+  [application-loopback sample](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/)
+  documents build 20348+, while [OBS documents application capture on Windows 10 version 2004+](https://obsproject.com/kb/application-audio-capture-guide)
+  using the same process-loopback mechanism. The helper attempts the real API instead of declaring
+  Windows 10 unsupported. If activation fails, diagnostics contain the native error and no broad
+  system-audio fallback is allowed.
+- **Window audio means application audio**: the owning process and its descendants are captured,
+  not an individual browser tab. Windows or tabs that share an application's process tree may share
+  its audio. Applications rendering audio outside that tree can be silent; their capture is never
+  broadened to the entire desktop.
+- **One Windows audio share at a time**: stop the active share before selecting a different source.
+  Native stop, failed acquisition and page navigation release ownership; session identifiers reject
+  delayed audio or stop events belonging to a previous share.
 - macOS gets video through the picker, no system audio.
 - Another instance of this app on the same machine is a separate application: its playback is captured
   by design, which is why the self test notes it and skips the tone-based leak check while it runs.
@@ -193,12 +203,13 @@ asks the user:
 | `src/connect/connect.html` | first-run / change-server picker |
 | `src/main/tap.ts` | recording node + per-application link management |
 | `src/main/windows-capture.ts` | runs `win-audio-capture.exe` and streams its PCM |
-| `native/windows/win-audio-capture.cpp` | WASAPI process loopback in exclude mode (build 20348+) |
+| `native/windows/win-audio-capture.cpp` | source-scoped WASAPI process loopback, include/exclude modes |
 | `src/main/legacy.ts` | cleans up the virtual sink older versions created |
 | `src/main/logger.ts` | console + `main.log` for bug reports |
 | `src/main/updater.ts` | automatic updates from the release page |
 | `src/main/picker.ts` | screen/window picker for platforms without one |
 | `src/main/selftest.ts` | tone-exclusion proof |
+| `scripts/windows-audio-smoke.ps1` | real Windows process-tree tone/isolation proof |
 | `src/preload/index.ts` | capture bridge |
 | `src/patch/` | main-world `getDisplayMedia` patch |
 | `src/patch/echo-test.ts` | 16 kHz probe that decides whether a capture can hear us |

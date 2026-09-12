@@ -23,7 +23,7 @@ import { pickDisplaySource, registerPickerIpc } from './picker';
 import { normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
 import { runSelftest } from './selftest';
 import { TapCapture } from './tap';
-import { WindowsCapture, helperExists } from './windows-capture';
+import { WindowsCapture, helperExists, windowsTargetForSource, type WindowsCaptureTarget } from './windows-capture';
 import { checkForUpdatesNow, installPendingUpdateSilently, setupAutoUpdates } from './updater';
 import { writeWav } from './wav';
 
@@ -33,14 +33,10 @@ let warnedAboutEcho = false;
 
 const tap = new TapCapture({ tapName: config.tapName, log });
 
-/**
- * Windows: the helper activates WASAPI process loopback in exclude mode for our own process tree,
- * which Chromium itself refuses to do below Windows 11. Everywhere else the PipeWire tap does it.
- */
 const windowsCapture = process.platform === 'win32' && helperExists() ? new WindowsCapture({ log }) : null;
 const captureSource = windowsCapture ?? (config.mode === 'capture' ? tap : null);
 /** Passed to the page so it knows where share audio comes from. */
-const captureKind = captureSource === windowsCapture ? 'windows' : captureSource ? 'pipewire' : 'none';
+const captureKind = windowsCapture ? 'windows' : captureSource ? 'pipewire' : 'none';
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -48,6 +44,12 @@ let shuttingDown = false;
 let allowedOrigin = '';
 let currentServerUrl: string | null = null;
 const debugChunks: Buffer[] = [];
+let pendingWindowsTarget: WindowsCaptureTarget | null = null;
+let selectingWindowsAudio = false;
+let acquiringWindowsAudio = false;
+let windowsCaptureSerial = 0;
+let activeWindowsSession: number | null = null;
+let captureDocument = 0;
 
 const installPermissionHandlers = (origin: () => string): void => {
   const allowed: Record<string, true> = {
@@ -71,6 +73,17 @@ const installPermissionHandlers = (origin: () => string): void => {
   // dialog (Hyprland's share picker) and returns what the user chose there; everywhere else —
   // Windows, macOS, X11 — we have to ask ourselves, in a window like Discord's.
   session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    const windowsAudio = process.platform === 'win32' && request.audioRequested;
+    const documentVersion = captureDocument;
+    if (windowsAudio && (selectingWindowsAudio || acquiringWindowsAudio || activeWindowsSession !== null)) {
+      log('another Windows audio share is already active');
+      callback({});
+      return;
+    }
+    if (windowsAudio) {
+      selectingWindowsAudio = true;
+      pendingWindowsTarget = null;
+    }
     const wayland = process.platform === 'linux' && process.env.XDG_SESSION_TYPE === 'wayland';
     const wantsSystemPicker = process.env.SHARKORD_PICKER === 'system' || (wayland && process.env.SHARKORD_PICKER !== 'inapp');
 
@@ -94,33 +107,30 @@ const installPermissionHandlers = (origin: () => string): void => {
       const picked = wantsSystemPicker
         ? sources[0] ?? null
         : await pickDisplaySource(mainWindow, sources, log);
+      if (windowsAudio && documentVersion !== captureDocument) {
+        callback({});
+        return;
+      }
 
       if (!picked) {
         log('screen share cancelled: no source selected');
         callback({});
         return;
       }
-      // The page owns the audio decision: it replaces whatever the browser captured with our own
-      // capture where one exists, and otherwise only keeps the browser's audio if a probe proves the
-      // voice channel is not in it. Linux is excluded because Chromium has no system audio there.
       const haveOwnCapture = captureSource !== null;
-      const wantsBrowserAudio =
-        request.audioRequested &&
-        process.platform !== 'linux' &&
-        process.env.SHARKORD_WINDOWS_AUDIO !== 'off';
+      if (windowsAudio && windowsCapture) pendingWindowsTarget = windowsTargetForSource(picked.id);
+      const wantsBrowserAudio = request.audioRequested && process.platform === 'darwin';
       log(
         'screen share source:',
         JSON.stringify({
           name: picked.name,
           of: sources.length,
           picker: wantsSystemPicker ? 'system' : 'in-app',
-          audio: haveOwnCapture
-            ? 'our own capture, browser audio as a fallback'
-            : wantsBrowserAudio
-              ? 'browser loopback'
-              : request.audioRequested
-                ? 'unavailable'
-                : 'not requested',
+          audio: request.audioRequested
+            ? haveOwnCapture
+              ? 'isolated native capture'
+              : wantsBrowserAudio ? 'browser loopback' : 'unavailable'
+            : 'not requested',
           helper: windowsCapture ? 'win-audio-capture.exe' : undefined,
           os: process.platform === 'win32' ? osRelease() : undefined
         })
@@ -129,28 +139,68 @@ const installPermissionHandlers = (origin: () => string): void => {
     } catch (error) {
       log('screen share failed:', error);
       callback({});
+    } finally {
+      if (windowsAudio && documentVersion === captureDocument) selectingWindowsAudio = false;
     }
   });
 };
 
 const registerIpc = (): void => {
   ipcMain.handle('patch:source', async () => readFile(join(__dirname, 'patch.js'), 'utf8'));
-  ipcMain.handle('capture:acquire', async () => {
-    // Rejecting matters: the page treats a resolved call as "audio is coming".
+  ipcMain.handle('capture:acquire', async (event) => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) {
+      throw new Error('capture is only available to the main client');
+    }
     if (!captureSource) throw new Error('this platform has no capture of its own');
-    captureSource.start();
-    // A helper that dies at startup (no exclude mode on this Windows build) must not look like one
-    // that works, or the share would carry silence instead of falling back to system audio.
-    if (windowsCapture) await windowsCapture.waitUntilCapturing();
+    if (!windowsCapture) {
+      tap.start();
+      return;
+    }
+    if (acquiringWindowsAudio || activeWindowsSession !== null) throw new Error('another audio share is already active');
+    const target = pendingWindowsTarget;
+    pendingWindowsTarget = null;
+    if (!target) throw new Error('no Windows audio source was selected');
+    acquiringWindowsAudio = true;
+    const sessionId = ++windowsCaptureSerial;
+    activeWindowsSession = sessionId;
+    try {
+      windowsCapture.start(target);
+      await windowsCapture.waitUntilCapturing();
+      if (activeWindowsSession !== sessionId) throw new Error('the audio capture ended during acquisition');
+      return sessionId;
+    } catch (error) {
+      if (activeWindowsSession === sessionId) {
+        activeWindowsSession = null;
+        windowsCapture.stop();
+      }
+      throw error;
+    } finally {
+      if (windowsCaptureSerial === sessionId) acquiringWindowsAudio = false;
+    }
   });
-  ipcMain.handle('capture:release', () => {
+  ipcMain.handle('capture:release', (event, sessionId: unknown) => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) return;
+    if (windowsCapture) {
+      if (sessionId !== activeWindowsSession || activeWindowsSession === null) return;
+      activeWindowsSession = null;
+      pendingWindowsTarget = null;
+    }
     captureSource?.stop();
   });
-  captureSource?.onData((chunk: Buffer) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('pcm', chunk);
+  windowsCapture?.onStopped((error) => {
+    log('Windows audio capture stopped:', error.message);
+    const sessionId = activeWindowsSession;
+    activeWindowsSession = null;
+    if (sessionId !== null && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('capture:ended', sessionId);
     }
-    debugChunks.push(chunk);
+  });
+  captureSource?.onData((chunk: Buffer) => {
+    if (windowsCapture && activeWindowsSession === null) return;
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('pcm', chunk, windowsCapture ? activeWindowsSession : undefined);
+    }
+    if (config.debugPcm) debugChunks.push(chunk);
   });
 };
 
@@ -211,6 +261,15 @@ const bootstrap = async (): Promise<void> => {
   const attachWindow = (window: BrowserWindow): void => {
     window.webContents.on('preload-error', (_event, path, error) => {
       log('preload failed:', path, error);
+    });
+    window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
+      if (!isMainFrame || !windowsCapture) return;
+      captureDocument += 1;
+      activeWindowsSession = null;
+      selectingWindowsAudio = false;
+      acquiringWindowsAudio = false;
+      windowsCapture.stop();
+      pendingWindowsTarget = null;
     });
     let mentionedTray = false;
     window.on('close', (event) => {
@@ -478,14 +537,13 @@ const bootstrap = async (): Promise<void> => {
     if (details.mode === 'system-audio-unavailable' && !warnedAboutEcho) {
       warnedAboutEcho = true;
       log(
-        'WARNING: this share could not prove the captured audio excludes this app, so it stays video-only ' +
-          '(no echo). Check Server → Show diagnostics… for the capture log; playing Sharkord through a device that is ' +
-          'not being shared makes system audio usable again.'
+        'WARNING: isolated audio capture is unavailable; this share stays video-only. ' +
+          'No system-loopback fallback is used on Windows. Check Server → Show diagnostics… for the capture log.'
       );
       if (Notification.isSupported()) {
         new Notification({
           title: 'Sharing video only',
-          body: 'System audio could not be captured without your own voice in it, so this share has no sound. See Server → Show diagnostics… for details.'
+          body: 'Isolated audio capture is unavailable, so this share has no sound. See Server → Show diagnostics… for details.'
         }).show();
       }
     }

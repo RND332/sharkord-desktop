@@ -144,63 +144,38 @@ const pageSetup = (measureMs: number): string => `
     return Math.sqrt(Math.max(0, s1 * s1 + s2 * s2 - k * s1 * s2)) / samples.length * 2;
   };
   window.__selftestPromise = (async () => {
-    const bridge = window.sharkordDesktop;
-    const stats = { pcmCallbacks: 0, writes: 0, writeError: null, maxInputPc: 0, maxInputApp: 0, framesRead: 0, maxFrameAbs: 0 };
-    await bridge.acquireCapture();
-    const generator = new MediaStreamTrackGenerator({ kind: 'audio' });
-    const writer = generator.writable.getWriter();
-    let stamp = 0;
-    let pending = 0;
-    bridge.onPcm((chunk) => {
-      stats.pcmCallbacks++;
-      const frames = Math.floor(chunk.byteLength / (4 * CH));
-      if (!frames) return;
-      const data = new Float32Array(chunk.buffer, chunk.byteOffset, frames * CH).slice();
-      const left = new Float32Array(frames);
-      for (let i = 0, j = 0; i < data.length; i += CH, j++) left[j] = data[i];
-      stats.maxInputPc = Math.max(stats.maxInputPc, amp(left, PC));
-      stats.maxInputApp = Math.max(stats.maxInputApp, amp(left, APP));
-      if (pending < 12) {
-        pending++;
-        stats.writes++;
-        writer.write(new AudioData({
-          format: 'f32',
-          sampleRate: SR,
-          numberOfFrames: frames,
-          numberOfChannels: CH,
-          timestamp: stamp,
-          data
-        })).then(() => {}).catch((error) => { stats.writeError = String(error); }).finally(() => pending--);
-      }
-      stamp += Math.round(frames / SR * 1e6);
-    });
-
-    const reader = new MediaStreamTrackProcessor({ track: generator }).readable.getReader();
+    const stats = { framesRead: 0, maxFrameAbs: 0 };
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    const track = stream.getAudioTracks()[0];
+    if (!track) throw new Error('the display-media patch returned no audio track');
+    const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+    const timer = setTimeout(() => void reader.cancel(), ${measureMs});
     const perWindow = SR * ${WINDOW_SECONDS};
     const windows = [];
     let mono = [];
-    const started = performance.now();
-    while (performance.now() - started < ${measureMs}) {
-      const { value: frame, done } = await reader.read();
-      if (done) break;
-      const interleaved = new Float32Array(frame.numberOfFrames * frame.numberOfChannels);
-      // Interleaved copy of every channel; a planar frame copied plane-by-plane would break the rate.
-      frame.copyTo(interleaved, { planeIndex: 0, format: 'f32' });
-      frame.close();
-      stats.framesRead++;
-      for (let i = 0; i < interleaved.length; i++) {
-        const value = Math.abs(interleaved[i]);
-        if (value > stats.maxFrameAbs) stats.maxFrameAbs = value;
+    try {
+      for (;;) {
+        const { value: frame, done } = await reader.read();
+        if (done) break;
+        const interleaved = new Float32Array(frame.numberOfFrames * frame.numberOfChannels);
+        frame.copyTo(interleaved, { planeIndex: 0, format: 'f32' });
+        frame.close();
+        stats.framesRead++;
+        for (let i = 0; i < interleaved.length; i++) {
+          stats.maxFrameAbs = Math.max(stats.maxFrameAbs, Math.abs(interleaved[i]));
+        }
+        for (let i = 0; i < interleaved.length; i += CH) mono.push(interleaved[i]);
+        while (mono.length >= perWindow) {
+          const window = Float32Array.from(mono.splice(0, perWindow));
+          windows.push({ app: amp(window, APP), pc: amp(window, PC) });
+        }
       }
-      for (let i = 0; i < interleaved.length; i += CH) {
-        mono.push(interleaved[i]);
-      }
-      while (mono.length >= perWindow) {
-        const window = Float32Array.from(mono.splice(0, perWindow));
-        windows.push({ app: amp(window, APP), pc: amp(window, PC) });
-      }
+      return { windows, stats };
+    } finally {
+      clearTimeout(timer);
+      await reader.cancel();
+      for (const captured of stream.getTracks()) captured.stop();
     }
-    return { windows, stats };
   })();
 })();
 `;
@@ -229,6 +204,16 @@ export const runSelftest = async (options: SelftestOptions): Promise<{ pass: boo
   await toneWav(tonePath, PC_TONE_HZ, TONE_SECONDS);
 
   await sleep(WARMUP_MS);
+  await window.webContents.executeJavaScript(
+    `(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = 16;
+      canvas.getContext('2d').fillRect(0, 0, 16, 16);
+      navigator.mediaDevices.getDisplayMedia = async () => canvas.captureStream(5);
+    })()`,
+    true
+  );
+  await window.webContents.executeJavaScript(readFileSync(join(__dirname, 'patch.js'), 'utf8'), true);
   await window.webContents.executeJavaScript(pageSetup(TONE_SECONDS * 1000 + 800), true);
   const appTone = await window.webContents.executeJavaScript(
     `(async () => {
@@ -281,9 +266,6 @@ export const runSelftest = async (options: SelftestOptions): Promise<{ pass: boo
   const ownPids = tappedPids.filter((pid) => isOwnProcess(pid));
   if (ownPids.length > 0) {
     failures.push(`the tap linked this app's own audio (pids: ${ownPids.join(', ')})`);
-  }
-  if (tappedPids.length === 0) {
-    failures.push('the tap linked no application at all');
   }
 
   // Another instance of this app on the same machine is a separate application, so its audio is

@@ -1,6 +1,6 @@
 {
   "name": "sharkord-desktop",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "Sharkord desktop client whose screen share carries the whole PC's audio except Sharkord itself",
   "author": "Talgat Minigaliev <https://github.com/RND332>",
@@ -8,8 +8,10 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "node build.mjs",
+    "build:windows-audio": "powershell -NoProfile -File scripts/build-windows-audio.ps1",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:windows-audio": "powershell -NoProfile -File scripts/windows-audio-smoke.ps1",
     "icon": "node scripts/make-icon.mjs",
     "start": "bun run build && electron .",
     "selftest": "bun run build && electron . --selftest",
