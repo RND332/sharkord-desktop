@@ -194,6 +194,7 @@ describe('getDisplayMedia patch on non-PipeWire platforms', () => {
       calls.push(constraints ?? {});
       return original;
     });
+    const reportCaptureMode = vi.fn(async () => true);
     const env: PatchEnvironment = {
       mediaDevices: { getDisplayMedia } as unknown as PatchEnvironment['mediaDevices'],
       MediaStream: FakeMediaStream as unknown as PatchEnvironment['MediaStream'],
@@ -201,6 +202,7 @@ describe('getDisplayMedia patch on non-PipeWire platforms', () => {
       AudioData: (() => {}) as unknown as PatchEnvironment['AudioData'],
       bridge: {
         platform: 'win32',
+        reportCaptureMode,
         acquireCapture: vi.fn(async () => {}),
         releaseCapture: vi.fn(async () => {}),
         onPcm: () => () => {}
@@ -208,7 +210,7 @@ describe('getDisplayMedia patch on non-PipeWire platforms', () => {
       log: () => {}
     };
     installGetDisplayMediaPatch(env);
-    return { env, calls, original, getDisplayMedia };
+    return { env, calls, original, getDisplayMedia, reportCaptureMode };
   };
 
   it('leaves a video-only request untouched', async () => {
@@ -220,12 +222,14 @@ describe('getDisplayMedia patch on non-PipeWire platforms', () => {
   });
 
   it('asks Chromium to keep this app out of the captured system audio', async () => {
-    const { env, calls } = windowsSetup();
+    const { env, calls, reportCaptureMode } = windowsSetup();
     await env.mediaDevices.getDisplayMedia({ video: true, audio: { echoCancellation: false } });
 
     expect(calls).toHaveLength(1);
     expect(calls[0]?.video).toBe(true);
     expect(calls[0]?.audio).toMatchObject({ echoCancellation: false, restrictOwnAudio: true });
+    // so the log and the diagnostics say which strategy actually ran
+    expect(reportCaptureMode).toHaveBeenCalledWith('system-audio-with-restriction');
   });
 
   it('never touches the capture bridge there', async () => {

@@ -34,6 +34,7 @@ export type PatchEnvironment = {
   bridge: {
     platform?: string;
     appInfo?(): Promise<{ version: string; platform: string }>;
+    reportCaptureMode?(mode: string): Promise<boolean>;
     acquireCapture(): Promise<void>;
     releaseCapture(): Promise<void>;
     onPcm(cb: (chunk: Uint8Array) => void): () => void;
@@ -120,6 +121,7 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
       const audio = typeof constraints.audio === 'object' ? constraints.audio : {};
       // restrictOwnAudio is a Chromium-only display-capture constraint, absent from the DOM types.
       const audioWithRestriction = { ...audio, restrictOwnAudio: true } as MediaTrackConstraints;
+      void env.bridge.reportCaptureMode?.('system-audio-with-restriction');
       return originalGetDisplayMedia({ ...constraints, audio: audioWithRestriction });
     };
     return;
@@ -138,6 +140,7 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
     let injected: { track: AudioTrackLike; release(): void };
     try {
       injected = await createCapturedTrack();
+      void env.bridge.reportCaptureMode?.('pipewire-pcm');
     } catch (error) {
       log('system audio capture unavailable, sharing video only', error);
       return videoStream;

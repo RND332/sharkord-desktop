@@ -15,6 +15,7 @@ import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { release as osRelease } from 'node:os';
 import { loadConfig } from './config';
 import { describeEnvironment, log, readLogTail } from './logger';
 import { removeLegacyRouting } from './legacy';
@@ -26,6 +27,19 @@ import { checkForUpdatesNow, installPendingUpdateSilently, setupAutoUpdates } fr
 import { writeWav } from './wav';
 
 const config = loadConfig();
+
+/**
+ * Chromium implements the `restrictOwnAudio` display-capture constraint with Windows' process-tree
+ * loopback exclusion, which the OS only exposes from Windows 11 (build 22000) onwards — the check in
+ * Chromium is `IsRestrictOwnAudioSupported()`. Before that the constraint is silently ignored.
+ */
+const canExcludeOwnAudio = (): boolean => {
+  if (process.platform !== 'win32') return true;
+  const build = Number(osRelease().split('.')[2] ?? 0);
+  return Number.isFinite(build) && build >= 22000;
+};
+
+let warnedAboutEcho = false;
 
 const tap = new TapCapture({ tapName: config.tapName, log });
 
@@ -89,17 +103,25 @@ const installPermissionHandlers = (origin: () => string): void => {
       }
       // Windows can hand us system audio; `restrictOwnAudio` (added by the injected patch) keeps
       // this client's own playback out of it. Set SHARKORD_WINDOWS_AUDIO=off to opt out.
-      // Off by default: the only system-audio path Electron exposes on Windows captures the whole
-      // output, including this client's own playback, and `restrictOwnAudio` does not filter it out
-      // in practice — viewers would hear themselves. Opt in with SHARKORD_WINDOWS_AUDIO=on.
-      const wantsAudio = request.audioRequested && process.platform === 'win32' && process.env.SHARKORD_WINDOWS_AUDIO === 'on';
+      const wantsAudio =
+        request.audioRequested && process.platform === 'win32' && process.env.SHARKORD_WINDOWS_AUDIO !== 'off';
+      if (wantsAudio && !canExcludeOwnAudio() && !warnedAboutEcho) {
+        warnedAboutEcho = true;
+        log(
+          `WARNING: ${osRelease()} cannot exclude this app's own playback from system audio ` +
+            '(Chromium needs Windows 11, build 22000+), so viewers will also hear the voice channel you hear. ' +
+            'Set SHARKORD_WINDOWS_AUDIO=off for video-only shares.'
+        );
+      }
       log(
         'screen share source:',
         JSON.stringify({
           name: picked.name,
           of: sources.length,
           picker: wantsSystemPicker ? 'system' : 'in-app',
-          audio: wantsAudio ? 'loopback' : request.audioRequested ? 'ignored' : 'not requested'
+          audio: wantsAudio ? 'loopback' : request.audioRequested ? 'ignored' : 'not requested',
+          ownAudioExcluded: wantsAudio ? canExcludeOwnAudio() : undefined,
+          os: process.platform === 'win32' ? osRelease() : undefined
         })
       );
       callback(wantsAudio ? { video: picked, audio: 'loopback' } : { video: picked });
@@ -426,6 +448,10 @@ const bootstrap = async (): Promise<void> => {
   };
 
   ipcMain.handle('app:info', () => ({ version: app.getVersion(), platform: process.platform }));
+  ipcMain.handle('capture:mode', (_event, mode: unknown) => {
+    log('page capture mode:', String(mode));
+    return true;
+  });
   ipcMain.handle('server:current', () => currentServerUrl);
   ipcMain.handle('server:submit', async (_event, raw: unknown) => {
     const normalized = normalizeServerUrl(typeof raw === 'string' ? raw : '');

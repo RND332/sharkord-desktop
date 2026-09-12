@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { release as osRelease } from 'node:os';
 import { app } from 'electron';
 
 /** Keep the log small enough to attach to a bug report. */
@@ -44,6 +45,7 @@ export const describeEnvironment = (): string => {
     `electron:  ${process.versions.electron} (chromium ${process.versions.chrome})`,
     `packaged:  ${app.isPackaged}`,
     `session:   ${process.env.XDG_SESSION_TYPE ?? 'n/a'}`,
+    `os:        ${osRelease()}`,
     `log:       ${logPath()}`
   ];
   return lines.join('\n');

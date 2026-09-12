@@ -9,6 +9,8 @@ const bridge = {
   platform: process.platform,
   /** Version/platform for the badge the page shows in its corner. */
   appInfo: (): Promise<{ version: string; platform: string }> => ipcRenderer.invoke('app:info'),
+  /** The page reports which capture strategy it installed; it lands in the log. */
+  reportCaptureMode: (mode: string): Promise<boolean> => ipcRenderer.invoke('capture:mode', mode),
   /** Used by the built-in server picker; harmless on the client page. */
   currentServer: (): Promise<string | null> => ipcRenderer.invoke('server:current'),
   submitServer: (url: string): Promise<{ ok: boolean; error?: string }> =>
