@@ -13,6 +13,9 @@ export type ChildProcessLike = {
 
 export type Spawner = (bin: string, args: string[]) => ChildProcessLike;
 
+/** The helper exits with this when the OS itself has no process loopback (Windows 10 and older). */
+export const PERMANENT_EXIT_CODE = 3;
+
 const defaultSpawner: Spawner = (bin, args) =>
   spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] }) as unknown as ChildProcessLike;
 
@@ -160,6 +163,13 @@ export class WindowsCapture {
       if (!settle()) return;
       this.waiter?.reject(new Error(`the audio helper exited with code ${code ?? 'null'}`));
       if (this.stopping) return;
+
+      // Exit 3 is the helper saying the OS has no exclude mode at all: retrying changes nothing.
+      if (code === PERMANENT_EXIT_CODE) {
+        this.stopping = true;
+        this.log('this Windows build has no process-excluding loopback; system audio will be measured instead');
+        return;
+      }
 
       const backoff = this.options.backoffMs ?? [250, 500, 1000, 2000, 4000];
       const maxRestarts = this.options.maxRestarts ?? 5;

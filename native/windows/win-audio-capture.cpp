@@ -128,9 +128,10 @@ int main(int argc, char** argv) {
   CloseHandle(done);
 
   if (FAILED(handler->failure()) || handler->client() == nullptr) {
-    // The OS refused exclude mode: on this Windows build the capture does not exist.
+    // The OS refused exclude mode: on this Windows build the capture does not exist. Exit 3 says
+    // "permanent", so the caller stops retrying and falls back to system audio plus its probe.
     std::fprintf(stderr, "exclude-mode activation failed: 0x%08lX\n", static_cast<unsigned long>(handler->failure()));
-    return 2;
+    return 3;
   }
 
   ComPtr<IAudioClient> client = handler->client();

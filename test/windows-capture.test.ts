@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { WindowsCapture, type ChildProcessLike } from '../src/main/windows-capture';
+import { PERMANENT_EXIT_CODE, WindowsCapture, type ChildProcessLike } from '../src/main/windows-capture';
 
 class FakeChild extends EventEmitter implements ChildProcessLike {
   stdout = new EventEmitter();
@@ -125,9 +125,23 @@ describe('WindowsCapture', () => {
     capture.start();
 
     const ready = capture.waitUntilCapturing(500);
-    children[0]!.emit('exit', 2); // what the helper does when activation fails
+    children[0]!.emit('exit', PERMANENT_EXIT_CODE); // what the helper does when activation fails
 
-    await expect(ready).rejects.toThrow(/exited with code 2/);
+    await expect(ready).rejects.toThrow(/exited with code 3/);
+    expect(capture.running).toBe(false);
+    capture.stop();
+  });
+
+  it('does not retry a build that has no exclude mode at all', async () => {
+    vi.useFakeTimers();
+    const { capture, spawner, children, logs } = setup({ backoffMs: [1] });
+    capture.start();
+
+    children[0]!.emit('exit', PERMANENT_EXIT_CODE);
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(spawner).toHaveBeenCalledTimes(1);
+    expect(logs.some((line) => line.includes('no process-excluding loopback'))).toBe(true);
     capture.stop();
   });
 
