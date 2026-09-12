@@ -22,8 +22,7 @@ export type CaptureMode =
   | 'captured-pcm'
   | 'system-audio'
   | 'system-audio-echo'
-  | 'system-audio-unavailable'
-  | 'video-only';
+  | 'system-audio-unavailable';
 
 export type PatchEnvironment = {
   mediaDevices: {

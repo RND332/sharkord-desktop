@@ -100,14 +100,13 @@ const installPermissionHandlers = (origin: () => string): void => {
         callback({});
         return;
       }
-      // With a capture of our own (PipeWire tap or the Windows helper) the browser is never asked
-      // for audio: the page injects our track instead. Without one, Windows system audio is handed
-      // over and the page measures whether it can hear us — SHARKORD_WINDOWS_AUDIO=off skips that.
+      // The page owns the audio decision: it replaces whatever the browser captured with our own
+      // capture where one exists, and otherwise only keeps the browser's audio if a probe proves the
+      // voice channel is not in it. Linux is excluded because Chromium has no system audio there.
       const haveOwnCapture = captureSource !== null;
       const wantsBrowserAudio =
         request.audioRequested &&
-        !haveOwnCapture &&
-        process.platform === 'win32' &&
+        process.platform !== 'linux' &&
         process.env.SHARKORD_WINDOWS_AUDIO !== 'off';
       log(
         'screen share source:',
@@ -116,7 +115,7 @@ const installPermissionHandlers = (origin: () => string): void => {
           of: sources.length,
           picker: wantsSystemPicker ? 'system' : 'in-app',
           audio: haveOwnCapture
-            ? 'our own capture'
+            ? 'our own capture, browser audio as a fallback'
             : wantsBrowserAudio
               ? 'browser loopback'
               : request.audioRequested

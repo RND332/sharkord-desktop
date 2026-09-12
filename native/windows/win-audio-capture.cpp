@@ -39,16 +39,16 @@ long Argument(int argc, char** argv, const char* name, long fallback) {
   return value;
 }
 
-// Agility matters: the activation completes on an arbitrary thread, so the handler declares FtmBase
-// (after RuntimeClass, which is the order WRL requires) instead of being a plain COM object.
+// The activation completes on an arbitrary thread, so the handler declares FtmBase as part of the
+// runtime class (this is how Chromium declares the same handler); without it COM cannot marshal it.
 class ActivationHandler final
     : public Microsoft::WRL::RuntimeClass<Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
-                                          IActivateAudioInterfaceCompletionHandler>,
-      public FtmBase {
+                                          Microsoft::WRL::FtmBase,
+                                          IActivateAudioInterfaceCompletionHandler> {
  public:
   explicit ActivationHandler(HANDLE done) : done_(done) {}
 
-  HRESULT STDMETHODCALLTYPE ActivateCompleted(IActivateAudioInterfaceAsyncOperation* operation) override {
+  IFACEMETHODIMP ActivateCompleted(IActivateAudioInterfaceAsyncOperation* operation) override {
     HRESULT activate_result = E_FAIL;
     ComPtr<IUnknown> activated;
     if (operation != nullptr) {
