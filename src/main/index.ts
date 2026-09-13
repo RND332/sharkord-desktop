@@ -244,6 +244,13 @@ const bootstrap = async (): Promise<void> => {
     return;
   }
 
+  app.configureHostResolver({
+    enableBuiltInResolver: true,
+    secureDnsMode: 'secure',
+    secureDnsServers: ['https://1.1.1.1/dns-query']
+  });
+  await session.defaultSession.setProxy({ mode: 'direct' });
+
   installPermissionHandlers(() => allowedOrigin);
   registerPickerIpc();
   registerIpc();

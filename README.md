@@ -111,6 +111,21 @@ startup and every time you pick **Server → Check for updates…**:
 - `SHARKORD_UPDATE_FEED=https://…` points the updater at another host (a mirror, or a local test feed).
 - Development checkouts never update themselves (`app.isPackaged` gate).
 
+### Secure connection defaults
+
+The app enables application-wide strict DNS-over-HTTPS using
+`https://1.1.1.1/dns-query`, with no plaintext DNS fallback. HTTPS DNS records let
+Chromium negotiate Encrypted Client Hello (ECH) when the server publishes an ECH
+configuration. ECH is not mandatory for arbitrary servers; an ECH-only server
+enforces that requirement itself.
+
+The client session connects directly instead of inheriting a system HTTP/SOCKS
+proxy, so Chromium can resolve the server's HTTPS records locally. OS proxy
+settings and VPN routing are not changed. The updater shares the app's DNS policy,
+but its separate session is not forced into direct mode. Networks must allow the
+DoH endpoint and direct access to the selected server; the client never falls back
+to system DNS or an inherited proxy.
+
 ### Configuration
 
 | Variable | Default | Meaning |
