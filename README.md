@@ -73,6 +73,10 @@ verified in CI-less local tests via `SHARKORD_DEBUG_QUIT_AFTER` / `SHARKORD_DEBU
 the way out **without** relaunching the app, so quitting really quits — set
 `SHARKORD_UPDATE_NO_PROMPT=1` to skip the restart prompt entirely.
 
+HTTP(S) links the client opens in a new window, and clicked cross-origin links, are opened in the
+default system browser instead of Electron child windows. Same-origin in-app navigation is preserved,
+and non-web schemes (`file:`, `javascript:` and the like) are never handed to the OS.
+
 ## Usage
 
 ```bash

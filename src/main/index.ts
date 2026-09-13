@@ -9,6 +9,7 @@ import {
   nativeImage,
   Notification,
   session,
+  shell,
   Tray
 } from 'electron';
 import { existsSync } from 'node:fs';
@@ -266,11 +267,34 @@ const bootstrap = async (): Promise<void> => {
   };
 
   const attachWindow = (window: BrowserWindow): void => {
+    const webUrl = (raw: string): URL | null => {
+      let url: URL;
+      try {
+        url = new URL(raw);
+      } catch {
+        return null;
+      }
+      return url.protocol === 'http:' || url.protocol === 'https:' ? url : null;
+    };
+    const openExternal = (link: string): void => {
+      shell.openExternal(link).catch((error) => log('could not open external link:', error));
+    };
+    window.webContents.setWindowOpenHandler(({ url }) => {
+      const link = webUrl(url);
+      if (link) openExternal(link.href);
+      return { action: 'deny' };
+    });
+    window.webContents.on('will-navigate', (details) => {
+      const link = webUrl(details.url);
+      if (!link || link.origin === allowedOrigin) return;
+      details.preventDefault();
+      openExternal(link.href);
+    });
     window.webContents.on('preload-error', (_event, path, error) => {
       log('preload failed:', path, error);
     });
-    window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
-      if (!isMainFrame || !windowsCapture) return;
+    window.webContents.on('did-navigate', () => {
+      if (!windowsCapture) return;
       captureDocument += 1;
       activeWindowsSession = null;
       selectingWindowsAudio = false;
