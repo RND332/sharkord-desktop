@@ -20,6 +20,10 @@ and music, never their own voices.
 | **Windows** | Native process-loopback capture: screen shares exclude Sharkord's process tree; window shares include only the selected application's process tree. Availability is determined by native activation, not a Windows-version gate. Windows audio measurements are still required; a successful build alone does not prove isolation. |
 | macOS | Wrapper only, untested. No own capture: the share carries whatever the platform gives `getDisplayMedia`, after the same proof. |
 
+- **Linux + AppImage**: camera can disappear (`NotFoundError: Requested device not found`) after a
+  second-instance handoff; fixed by the launcher extracting each launch into its own directory.
+  Install with `scripts/install-local.sh` to refresh the launcher — an AppImage update alone does
+  not replace it.
 Builds for all three platforms are produced by CI.
 
 ## Install
@@ -109,6 +113,13 @@ Arch users can also `sudo pacman -U` the `.pacman` from Releases.
 The app checks the [release page](https://github.com/RND332/sharkord-desktop/releases) shortly after
 startup and every time you pick **Server → Check for updates…**:
 
+- **Linux cameras can die when a second instance hands off**: the AppImage runtime extracts into one
+  content-hashed directory shared by every launch and deletes it when that launch exits, so a
+  second-instance handoff deleted the helpers a running client was using (e.g. the webcam). The
+  launcher now extracts each launch into its own directory and cleans it up on exit. Existing
+  installs must refresh the launcher (`scripts/install-local.sh`) — an AppImage update alone
+  does not replace the launcher.
+
 - **Windows installer (NSIS)** and **Linux AppImage** replace themselves in place; a downloaded update
   asks for a restart and is also applied on the next quit.
 - **deb / pacman** installs are updated by their package manager — the app says so instead of failing.
@@ -192,6 +203,13 @@ asks the user:
 
 ## Known limits
 
+- **Windows 10 window share can freeze Explorer**: Chromium's window capturer is always
+  Windows.Graphics.Capture. On some Windows 10 + GPU driver combinations that wedges DWM —
+  Alt+Tab, the Start menu and the taskbar stop responding — until `explorer.exe` is restarted
+  (or the GPU is reset with Win+Ctrl+Shift+B). Screen shares use DXGI and do not hit this path.
+  The picker on Windows does not snapshot live thumbnails of every window, which uses the same
+  DWM APIs as Alt+Tab. See the Windows 10 notes in a bug report if it still happens after a
+  graphics-driver update and with Game Bar / Hardware-accelerated GPU scheduling off.
 - **Windows availability**: Microsoft's
   [application-loopback sample](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/)
   documents build 20348+, while [OBS documents application capture on Windows 10 version 2004+](https://obsproject.com/kb/application-audio-capture-guide)

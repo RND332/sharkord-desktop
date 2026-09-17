@@ -17,4 +17,8 @@ fi
 if ldconfig -p 2>/dev/null | grep -q 'libfuse\.so\.2'; then
   exec "$image" "$@"
 fi
-exec "$image" --appimage-extract-and-run "$@"
+# Extract-and-run shares a content-hashed directory and deletes it on every exit.
+# A second-instance handoff must not delete the running client's camera helpers.
+runtime_dir=$(mktemp -d "${TMPDIR:-/tmp}/sharkord-runtime.XXXXXXXX") || exit 1
+trap 'rm -rf -- "$runtime_dir"' EXIT
+TMPDIR="$runtime_dir" "$image" --appimage-extract-and-run "$@"
