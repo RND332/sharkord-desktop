@@ -192,6 +192,7 @@
           const card = document.createElement('button');
           card.className = 'card';
           card.type = 'button';
+          card.dataset.sourceId = source.id;
           card.setAttribute('aria-selected', String(source.id === selectedId));
 
           const thumb = document.createElement('img');
@@ -249,9 +250,26 @@
       });
 
       (async () => {
-        sources = (await bridge.pickerSources()) ?? [];
+        const payload = await bridge.pickerSources();
+        sources = Array.isArray(payload) ? payload : payload?.sources ?? [];
         setFilter(sources.some((s) => typeOf(s.id) === 'screen') ? 'screen' : 'all');
       })();
+
+      // Live thumbnail refresh: the main process re-captures every few seconds and pushes only
+      // the thumbnails that changed. We patch those <img> elements in place so the grid stays
+      // responsive instead of re-rendering from scratch.
+      bridge.onPickerRefresh((payload) => {
+        const updated = Array.isArray(payload) ? payload : payload?.sources ?? [];
+        if (updated.length === 0) return;
+        const byId = new Map(updated.map((s) => [s.id, s]));
+        for (const source of sources) {
+          const fresh = byId.get(source.id);
+          if (!fresh || fresh.thumbnail === source.thumbnail) continue;
+          source.thumbnail = fresh.thumbnail;
+          const img = grid.querySelector(`[data-source-id="${CSS.escape(source.id)}"] img.thumb`);
+          if (img) img.src = fresh.thumbnail ?? '';
+        }
+      });
     </script>
   </body>
 </html>

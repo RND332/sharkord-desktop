@@ -18,15 +18,36 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { release as osRelease } from 'node:os';
 import { loadConfig } from './config';
-import { describeEnvironment, log, readLogTail } from './logger';
+import { describeEnvironment, getLogsDirectory, initializeLogging, log, readLogTail } from './logger';
 import { removeLegacyRouting } from './legacy';
-import { pickDisplaySource, registerPickerIpc } from './picker';
+import { displayCapturerRequest, pickDisplaySource, registerPickerIpc } from './picker';
 import { normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
 import { runSelftest } from './selftest';
 import { TapCapture } from './tap';
 import { WindowsCapture, helperExists, windowsTargetForSource, type WindowsCaptureTarget } from './windows-capture';
 import { checkForUpdatesNow, installPendingUpdateSilently, setupAutoUpdates } from './updater';
 import { writeWav } from './wav';
+
+initializeLogging();
+
+app.on('child-process-gone', (_event, details) => {
+  log('child process gone:', details, {
+    executableExists: existsSync(process.execPath),
+    resourcesExist: existsSync(process.resourcesPath)
+  });
+});
+app.on('render-process-gone', (_event, contents, details) => {
+  log('renderer gone:', { webContentsId: contents.id, ...details });
+});
+app.on('web-contents-created', (_event, contents) => {
+  const id = contents.id;
+  contents.on('preload-error', (_event, path, error) => log('preload failed:', id, path, error));
+  contents.on('did-fail-load', (_event, code, description, _url, mainFrame) => {
+    log('page load failed:', { webContentsId: id, code, description, mainFrame });
+  });
+  contents.on('unresponsive', () => log('renderer unresponsive:', id));
+  contents.on('responsive', () => log('renderer responsive:', id));
+});
 
 const config = loadConfig();
 
@@ -89,14 +110,27 @@ const installPermissionHandlers = (origin: () => string): void => {
     const wantsSystemPicker = process.env.SHARKORD_PICKER === 'system' || (wayland && process.env.SHARKORD_PICKER !== 'inapp');
 
     try {
+      const capturer = displayCapturerRequest({
+        platform: process.platform,
+        osRelease: osRelease(),
+        systemPicker: wantsSystemPicker
+      });
       const sources = await desktopCapturer.getSources({
-        types: ['screen', 'window'],
-        // Thumbnails are only needed for our own picker; the portal dialog draws its own.
-        thumbnailSize: wantsSystemPicker ? { width: 0, height: 0 } : { width: 320, height: 180 },
-        fetchWindowIcons: !wantsSystemPicker
+        types: capturer.types,
+        thumbnailSize: capturer.thumbnailSize,
+        fetchWindowIcons: capturer.fetchWindowIcons
       });
 
-      log('display sources:', JSON.stringify({ count: sources.length, picker: wantsSystemPicker ? 'system' : 'in-app' }));
+      log(
+        'display sources:',
+        JSON.stringify({
+          count: sources.length,
+          picker: wantsSystemPicker ? 'system' : 'in-app',
+          types: capturer.types,
+          thumbnails: capturer.thumbnailSize,
+          notice: capturer.notice
+        })
+      );
       if (sources.length === 0) {
         void dialog.showMessageBox({
           type: 'warning',
@@ -107,7 +141,7 @@ const installPermissionHandlers = (origin: () => string): void => {
 
       const picked = wantsSystemPicker
         ? sources[0] ?? null
-        : await pickDisplaySource(mainWindow, sources, log);
+        : await pickDisplaySource(mainWindow, sources, capturer, log, capturer.notice);
       if (windowsAudio && documentVersion !== captureDocument) {
         callback({});
         return;
@@ -245,6 +279,10 @@ const bootstrap = async (): Promise<void> => {
     return;
   }
 
+  void app.getGPUInfo('basic').then((info) => {
+    log('GPU information:', info, app.getGPUFeatureStatus());
+  }).catch((error) => log('could not read GPU information:', error));
+
   app.configureHostResolver({
     enableBuiltInResolver: true,
     secureDnsMode: 'secure',
@@ -289,9 +327,6 @@ const bootstrap = async (): Promise<void> => {
       if (!link || link.origin === allowedOrigin) return;
       details.preventDefault();
       openExternal(link.href);
-    });
-    window.webContents.on('preload-error', (_event, path, error) => {
-      log('preload failed:', path, error);
     });
     window.webContents.on('did-navigate', () => {
       if (!windowsCapture) return;
@@ -421,12 +456,17 @@ const bootstrap = async (): Promise<void> => {
             click: () => {
               void (async () => {
                 try {
-                  const sources = await desktopCapturer.getSources({
-                    types: ['screen', 'window'],
-                    thumbnailSize: { width: 320, height: 180 },
-                    fetchWindowIcons: true
+                  const capturer = displayCapturerRequest({
+                    platform: process.platform,
+                    osRelease: osRelease(),
+                    systemPicker: false
                   });
-                  log('picker test:', JSON.stringify({ count: sources.length }));
+                  const sources = await desktopCapturer.getSources({
+                    types: capturer.types,
+                    thumbnailSize: capturer.thumbnailSize,
+                    fetchWindowIcons: capturer.fetchWindowIcons
+                  });
+                  log('picker test:', JSON.stringify({ count: sources.length, types: capturer.types }));
                   if (sources.length === 0) {
                     await dialog.showMessageBox({
                       type: 'warning',
@@ -435,7 +475,7 @@ const bootstrap = async (): Promise<void> => {
                     });
                     return;
                   }
-                  const picked = await pickDisplaySource(mainWindow, sources, log);
+                  const picked = await pickDisplaySource(mainWindow, sources, capturer, log, capturer.notice);
                   await dialog.showMessageBox({
                     type: 'info',
                     title: 'Picker test',
@@ -470,6 +510,14 @@ const bootstrap = async (): Promise<void> => {
                   log('diagnostics copied to the clipboard');
                 }
               })();
+            }
+          },
+          {
+            label: 'Open logs folder',
+            click: () => {
+              void shell.openPath(getLogsDirectory()).then((error) => {
+                if (error) log('could not open logs folder:', error);
+              }).catch((error) => log('could not open logs folder:', error));
             }
           },
           {
