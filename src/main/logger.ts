@@ -6,19 +6,17 @@ import { inspect } from 'node:util';
 import { app } from 'electron';
 
 /**
- * Chromium flags that keep screen capture and the compositor running smoothly. Called before
- * `app.ready` so the GPU process and every renderer inherit them. The picker's live thumbnails
- * and the downstream share both benefit from an uncapped frame rate.
+ * Chromium flags needed for platform capture. Called before `app.ready` so the GPU process and
+ * every renderer inherit them. Keep Chromium's normal frame pacing: globally disabling it makes
+ * animated client pages render thousands of frames per second and starve interaction handling.
  */
+export const performanceFlags = (runtimePlatform: NodeJS.Platform): Array<[string, string?]> =>
+  runtimePlatform === 'win32' ? [['enable-features', 'UseWindowsGraphicsCapture']] : [];
+
 const applyPerformanceFlags = (): void => {
-  // Don't cap the renderer frame rate — screen content keeps moving even when the window is
-  // small or occluded, and the picker thumbnails should reflect that. Without this, Chromium
-  // locks to 60 fps and high-refresh displays share at half their rate.
-  app.commandLine.appendSwitch('disable-frame-rate-limit');
-  // Windows: use the modern Graphics Capture API (lower latency, better frame pacing) instead of
-  // the legacy DXGI path. Harmless on other platforms — Chromium ignores unknown OS flags.
-  if (platform() === 'win32') {
-    app.commandLine.appendSwitch('enable-features', 'UseWindowsGraphicsCapture');
+  for (const [name, value] of performanceFlags(platform())) {
+    if (value === undefined) app.commandLine.appendSwitch(name);
+    else app.commandLine.appendSwitch(name, value);
   }
 };
 
