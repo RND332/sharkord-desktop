@@ -163,6 +163,7 @@ export class TapCapture {
   private timer: NodeJS.Timeout | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
   private reconciling: Promise<void> | null = null;
+  private reconcileGeneration = 0;
   private readonly linked = new Set<string>();
   private readonly tappedPids = new Set<number>();
   private readonly dataCallbacks = new Set<(chunk: Buffer) => void>();
@@ -205,12 +206,16 @@ export class TapCapture {
   start(): void {
     if (this.child) return;
     this.stopping = false;
+    this.reconciling = null;
+    this.reconcileGeneration += 1;
     this.restarts = 0;
     this.spawnChild();
   }
 
   stop(): void {
     this.stopping = true;
+    this.reconcileGeneration += 1;
+    this.reconciling = null;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
@@ -243,24 +248,35 @@ export class TapCapture {
   /** Links any newly appeared playback stream into the tap. */
   async reconcile(): Promise<void> {
     // The poll timer, the IPC path and the first spawn can all ask at once; coalesce.
+    const child = this.child;
+    if (!child) return;
     if (this.reconciling) return this.reconciling;
-    this.reconciling = this.doReconcile().finally(() => {
-      this.reconciling = null;
-    });
-    return this.reconciling;
+    const generation = this.reconcileGeneration;
+    const promise = this.doReconcile(child, generation);
+    this.reconciling = promise;
+    void promise.then(
+      () => {
+        if (this.reconciling === promise) this.reconciling = null;
+      },
+      () => {
+        if (this.reconciling === promise) this.reconciling = null;
+      }
+    );
+    return promise;
   }
 
-  private async doReconcile(): Promise<void> {
-    if (!this.child) return;
+  private async doReconcile(child: ChildProcessLike, generation: number): Promise<void> {
+    const current = (): boolean => this.child === child && this.reconcileGeneration === generation && !this.stopping;
+    if (!current()) return;
 
     let graph: Graph;
     try {
       graph = parseGraph(await this.runner('pw-dump', ['-i', '0']), this.tapName);
     } catch (error) {
-      this.log('could not inspect the pipewire graph:', error);
+      if (current()) this.log('could not inspect the pipewire graph:', error);
       return;
     }
-    if (graph.tapNodeId === null) return;
+    if (!current() || graph.tapNodeId === null) return;
 
     const alive = new Set<number>();
     for (const stream of graph.streams) {
@@ -269,14 +285,17 @@ export class TapCapture {
 
       for (const port of stream.ports) {
         for (const target of targetsFor(port)) {
+          if (!current()) return;
           const key = `${stream.nodeId}:${port}->${target}`;
           if (this.linked.has(key)) continue;
           try {
             await this.runner('pw-link', [`${stream.nodeId}:${port}`, `${graph.tapNodeId}:${target}`]);
+            if (!current()) return;
             this.linked.add(key);
             if (stream.processId !== null) this.tappedPids.add(stream.processId);
             this.log(`tapped ${stream.appName || stream.nodeId}`);
           } catch (error) {
+            if (!current()) return;
             const message = error instanceof Error ? error.message : String(error);
             if (message.includes('File exists')) {
               this.linked.add(key);
@@ -288,6 +307,7 @@ export class TapCapture {
       }
     }
 
+    if (!current()) return;
     // Streams that vanished take their links with them.
     const alivePids = new Set(
       graph.streams.filter((stream) => alive.has(stream.nodeId)).map((stream) => stream.processId)
@@ -359,9 +379,10 @@ export class TapCapture {
     // 'error' and 'exit' can both arrive for one child; the first one wins.
     let settled = false;
     const settle = (): boolean => {
-      if (settled) return false;
+      if (settled || this.child !== child) return false;
       settled = true;
-      if (this.child === child) this.child = null;
+      this.child = null;
+      this.reconciling = null;
       return true;
     };
 

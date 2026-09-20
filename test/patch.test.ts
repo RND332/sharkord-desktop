@@ -13,6 +13,7 @@ type FakeTrack = {
   readyState: string;
   listeners: Record<string, Array<() => void>>;
   stopped: boolean;
+  contentHint: string;
   stop(): void;
   addEventListener(type: string, cb: () => void): void;
   emit(type: string): void;
@@ -23,6 +24,7 @@ const makeTrack = (kind: string): FakeTrack => ({
   readyState: 'live',
   listeners: {},
   stopped: false,
+  contentHint: '',
   stop() {
     this.stopped = true;
     this.readyState = 'ended';
@@ -211,6 +213,19 @@ describe('display-media patch: a video-only request changes nothing', () => {
     expect(env.getDisplayMedia).toHaveBeenCalledWith({ video: true });
     expect(env.acquireCapture).not.toHaveBeenCalled();
     expect(env.reportCaptureMode).not.toHaveBeenCalled();
+  });
+
+  it('keeps the settings-selected frame-rate target and marks the track for motion', async () => {
+    const env = setup();
+    const constraints = {
+      video: { frameRate: { max: 47 }, width: { ideal: 1920 } },
+      audio: false
+    };
+    const stream = await env.mediaDevices.getDisplayMedia(constraints);
+
+    expect(stream).toBe(env.originalStream);
+    expect(env.getDisplayMedia).toHaveBeenCalledWith(constraints);
+    expect(env.videoTrack.contentHint).toBe('motion');
   });
 });
 

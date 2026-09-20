@@ -87,6 +87,19 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
     return windowsShareRelease;
   };
 
+  /** Preserve the settings-selected frame rate while telling the encoder that smooth motion matters. */
+  const favorMotion = (stream: MediaStream): void => {
+    for (const track of stream.getVideoTracks()) {
+      const video = track as MediaStreamTrack & { contentHint?: string };
+      if (!('contentHint' in video)) continue;
+      try {
+        video.contentHint = 'motion';
+      } catch {
+        // An optional encoder hint must never make a share fail.
+      }
+    }
+  };
+
   const createCapturedTrack = async (
     video: MediaStreamTrack | undefined
   ): Promise<{ track: AudioTrackLike; release(): void }> => {
@@ -210,8 +223,11 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
     constraints: MediaStreamConstraints = {}
   ): Promise<MediaStream> => {
     const wantsAudio = Boolean(constraints.audio);
-    if (!wantsAudio) return originalGetDisplayMedia(constraints);
-
+    if (!wantsAudio) {
+      const stream = await originalGetDisplayMedia(constraints);
+      favorMotion(stream);
+      return stream;
+    }
     if (windows) {
       await windowsShareRelease;
       if (windowsShareOpen) throw new Error('a Windows audio share is already open');
@@ -221,6 +237,7 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
     let stream: MediaStream;
     try {
       stream = await originalGetDisplayMedia({ ...constraints, audio: true });
+      favorMotion(stream);
     } catch (error) {
       windowsShareOpen = false;
       throw error;

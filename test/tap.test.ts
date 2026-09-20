@@ -192,6 +192,58 @@ describe('TapCapture', () => {
     tap.stop();
   });
 
+  it('does not let a stopped share poison the next capture with stale links or errors', async () => {
+    const newDump = PW_DUMP.replace('"id":141,', '"id":241,');
+    const links: Link[] = [];
+    const logs: string[] = [];
+    let dumpCalls = 0;
+    let rejectFirst!: (error: Error) => void;
+    const runner: Runner = async (bin, args) => {
+      if (bin === 'pw-link') {
+        links.push({ from: args[0]!, to: args[1]! });
+        return '';
+      }
+      dumpCalls += 1;
+      if (dumpCalls === 1) {
+        return new Promise<string>((_resolve, reject) => {
+          rejectFirst = reject;
+        });
+      }
+      return newDump;
+    };
+    const spawner: Spawner = () => ({
+      stdout: null,
+      stderr: null,
+      on: () => {},
+      kill: () => {}
+    });
+    const tap = new TapCapture({
+      runner,
+      spawner,
+      pollMs: 60_000,
+      log: (...parts) => logs.push(parts.map(String).join(' '))
+    });
+
+    tap.start();
+    const firstReconcile = tap.reconcile();
+    tap.stop();
+    tap.start();
+    const secondReconcile = tap.reconcile();
+    rejectFirst(new Error('stale graph failed'));
+    await firstReconcile;
+    await secondReconcile;
+
+    expect(dumpCalls).toBe(2);
+    expect(links).toEqual([
+      { from: '221:output_FL', to: '241:input_FL' },
+      { from: '221:output_FR', to: '241:input_FR' },
+      { from: '222:output_MONO', to: '241:input_FL' },
+      { from: '222:output_MONO', to: '241:input_FR' }
+    ]);
+    expect(logs.some((line) => line.includes('could not inspect'))).toBe(false);
+    tap.stop();
+  });
+
   it('forgets streams that disappeared', async () => {
     const { tap } = makeWorld();
     tap.start();
