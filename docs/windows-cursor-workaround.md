@@ -2,8 +2,8 @@
 
 ## Experimental workaround
 
-Build this branch, then **quit Sharkord Desktop from its tray menu** (closing the
-window is not enough). Start the resulting Windows app with:
+Install Sharkord Desktop 0.6.9 or later, then **quit it from its tray menu**
+(closing the window is not enough). Start the Windows app with:
 
 ```powershell
 & 'C:\path\to\Sharkord Desktop.exe' --software-rendering
@@ -11,8 +11,8 @@ window is not enough). Start the resulting Windows app with:
 
 Replace the example path with your installed or portable executable. Alternatively,
 append ` --software-rendering` after the quoted executable path in a Windows
-shortcut's Target. This option requires the build containing this change; it is
-not present in version 0.6.8's published binaries.
+shortcut's Target. This option was introduced in 0.6.9; it is not present in
+version 0.6.8's published binaries.
 
 The option disables Electron hardware acceleration before startup, on Windows
 only. It may help with GPU/driver-related local cursor rendering failures, but
