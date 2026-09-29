@@ -14,6 +14,12 @@ export const performanceFlags = (runtimePlatform: NodeJS.Platform): Array<[strin
   runtimePlatform === 'win32' ? [['enable-features', 'UseWindowsGraphicsCapture']] : [];
 
 const applyPerformanceFlags = (): void => {
+  // Opt-in GPU/driver workaround for an invisible local cursor during Windows sharing.
+  // This does not replace WGC or change the cursor embedded in the shared video.
+  if (platform() === 'win32' && process.argv.includes('--software-rendering')) {
+    app.disableHardwareAcceleration();
+    log('software rendering requested: hardware acceleration disabled');
+  }
   for (const [name, value] of performanceFlags(platform())) {
     if (value === undefined) app.commandLine.appendSwitch(name);
     else app.commandLine.appendSwitch(name, value);
