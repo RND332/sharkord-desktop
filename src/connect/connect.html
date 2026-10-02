@@ -96,6 +96,7 @@
       const input = document.getElementById('url');
       const button = document.getElementById('submit');
       const error = document.getElementById('error');
+      error.textContent = new URLSearchParams(window.location.search).get('error') ?? '';
 
       const bridge = window.sharkordDesktop;
       if (!bridge) {

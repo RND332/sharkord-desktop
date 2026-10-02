@@ -97,9 +97,11 @@ const installPermissionHandlers = (origin: () => string): void => {
   session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
     const windowsAudio = process.platform === 'win32' && request.audioRequested;
     const documentVersion = captureDocument;
+    let completed = false;
     if (windowsAudio && (selectingWindowsAudio || acquiringWindowsAudio || activeWindowsSession !== null)) {
       log('another Windows audio share is already active');
-      callback({});
+      // Electron's native API accepts null for denial; its Streams type omits that case.
+      callback(null!);
       return;
     }
     if (windowsAudio) {
@@ -143,13 +145,13 @@ const installPermissionHandlers = (origin: () => string): void => {
         ? sources[0] ?? null
         : await pickDisplaySource(mainWindow, sources, capturer, log, capturer.notice);
       if (windowsAudio && documentVersion !== captureDocument) {
-        callback({});
+        callback(null!);
         return;
       }
 
       if (!picked) {
         log('screen share cancelled: no source selected');
-        callback({});
+        callback(null!);
         return;
       }
       const haveOwnCapture = captureSource !== null;
@@ -170,10 +172,11 @@ const installPermissionHandlers = (origin: () => string): void => {
           os: process.platform === 'win32' ? osRelease() : undefined
         })
       );
+      completed = true;
       callback(wantsBrowserAudio ? { video: picked, audio: 'loopback' } : { video: picked });
     } catch (error) {
       log('screen share failed:', error);
-      callback({});
+      if (!completed) callback(null!);
     } finally {
       if (windowsAudio && documentVersion === captureDocument) selectingWindowsAudio = false;
     }
@@ -328,15 +331,17 @@ const bootstrap = async (): Promise<void> => {
       details.preventDefault();
       openExternal(link.href);
     });
-    window.webContents.on('did-navigate', () => {
-      if (!windowsCapture) return;
+    const releaseDocumentCapture = (): void => {
       captureDocument += 1;
       activeWindowsSession = null;
       selectingWindowsAudio = false;
       acquiringWindowsAudio = false;
-      windowsCapture.stop();
+      captureSource?.stop();
       pendingWindowsTarget = null;
-    });
+    };
+    window.webContents.on('did-navigate', releaseDocumentCapture);
+    window.webContents.on('render-process-gone', releaseDocumentCapture);
+    window.webContents.on('destroyed', releaseDocumentCapture);
     let mentionedTray = false;
     window.on('close', (event) => {
       if (shuttingDown) return;
@@ -535,13 +540,27 @@ const bootstrap = async (): Promise<void> => {
     ])
   );
 
-  const loadClient = async (url: string): Promise<void> => {
-    currentServerUrl = url;
-    allowedOrigin = new URL(url).origin;
+  const loadClient = async (url: string): Promise<boolean> => {
+    const normalized = normalizeServerUrl(url);
+    currentServerUrl = normalized ?? url;
     const target = mainWindow;
-    if (!target) return;
-    await target.loadURL(url);
-    log('client loaded:', url);
+    if (!target) return false;
+    try {
+      if (!normalized) throw new Error('Enter an address such as https://sharkord.example.com');
+      allowedOrigin = new URL(normalized).origin;
+      await target.loadURL(normalized);
+    } catch (error) {
+      if (target.isDestroyed() || target !== mainWindow || (error as NodeJS.ErrnoException).code === 'ERR_ABORTED') {
+        return false;
+      }
+      log('client connection failed:', error);
+      allowedOrigin = '';
+      await target.loadFile(connectPagePath, {
+        query: { error: error instanceof Error ? error.message : String(error) }
+      });
+      return false;
+    }
+    log('client loaded:', normalized);
 
     // The patch is injected asynchronously from the preload; give it a moment before judging.
     for (let attempt = 0; attempt < 10; attempt += 1) {
@@ -584,6 +603,7 @@ const bootstrap = async (): Promise<void> => {
       }
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
+    return true;
   };
 
   ipcMain.handle('app:info', () => ({ version: app.getVersion(), platform: process.platform }));
@@ -635,8 +655,8 @@ const bootstrap = async (): Promise<void> => {
       return { ok: false, error: 'Enter an address such as https://sharkord.example.com' };
     }
     try {
+      if (!await loadClient(normalized)) return { ok: false };
       saveServerUrl(serverConfigPath, normalized);
-      await loadClient(normalized);
       return { ok: true };
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) };

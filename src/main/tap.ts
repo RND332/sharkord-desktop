@@ -372,6 +372,7 @@ export class TapCapture {
     this.linked.clear();
 
     child.stdout?.on('data', (chunk) => {
+      if (this.child !== child || this.stopping) return;
       for (const callback of this.dataCallbacks) callback(chunk);
     });
     child.stderr?.on('data', (chunk) => this.log('pw-record:', chunk.toString().trim()));

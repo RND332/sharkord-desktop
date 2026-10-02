@@ -37,6 +37,10 @@ On first start the app asks which server to open and remembers the answer in
 (passing `--url=` also works and wins over the stored value). Anything without a scheme is assumed to
 be `https://`, and the address is validated before it is used.
 
+If the server cannot be reached, the client stays open and returns to this form with the attempted
+address and connection error. Retry or choose another server; a failed connection does not overwrite
+the last successfully connected server in `config.json`.
+
 ## How it works
 
 Nothing about your audio setup is touched: no sink is created, no default device changes, no stream is
@@ -174,6 +178,10 @@ disappears), the PCM framing (byte-exact carry, per-channel RMS, Goertzel select
 behaviour (passthrough, merge, fallback, backpressure, release), the server configuration (URL
 normalisation, hostile configs, storage round-trip) and the platform mode.
 
+Picker lifecycle regressions cover newly opened, renamed and closed windows, stale refreshes after
+cancellation, overlapping requests and failed picker-page loads. Recorder lifecycle tests also reject
+buffered PCM from a stopped or replaced process.
+
 `bun run test:windows-audio` is the separate real-Windows proof. Three independent application
 windows own child processes playing 997, 1493 and 2137 Hz tones. The script measures both PCM
 channels for screen exclusion, window inclusion, silent startup followed by resumed playback, and
@@ -200,6 +208,16 @@ asks the user:
   was usually the Sharkord window itself — that is fixed by the picker.
 
 `SHARKORD_PICKER=inapp|system` forces either picker (useful when a compositor's portal misbehaves).
+
+The in-app picker refreshes window names, icons and availability as well as thumbnails. Closing the
+selected window clears the selection and disables Share; newly opened windows become selectable
+without reopening the picker. Sources without thumbnails keep a blank preview rather than a broken
+image. Only one picker can be open at a time. Canceling rejects the media request once without an
+unhandled main-process error, and another share can start immediately.
+
+Native audio capture belongs to the client document: reloading, changing servers or losing the
+renderer stops it, including on Linux. In-page navigation and hiding the window to the tray preserve
+an active capture.
 
 ## Known limits
 

@@ -158,6 +158,33 @@ describe('TapCapture', () => {
     tap.stop();
   });
 
+  it('never delivers buffered PCM from a stopped or replaced recorder', () => {
+    const outputs: Array<(chunk: Buffer) => void> = [];
+    const spawner: Spawner = () => ({
+      stdout: { on: (_event, callback) => { outputs.push(callback); } },
+      stderr: null,
+      on: () => {},
+      kill: () => {}
+    });
+    const tap = new TapCapture({ spawner, runner: async () => '[]' });
+    const received: number[][] = [];
+    tap.onData((chunk) => received.push(Array.from(chunk)));
+
+    try {
+      tap.start();
+      outputs[0]!(Buffer.from([1]));
+      tap.stop();
+      outputs[0]!(Buffer.from([2]));
+      tap.start();
+      outputs[0]!(Buffer.from([4]));
+      outputs[1]!(Buffer.from([3]));
+
+      expect(received).toEqual([[1], [3]]);
+    } finally {
+      tap.stop();
+    }
+  });
+
   it("links every other application's playback into the tap by node id, mono fanned out", async () => {
     const { links, tap } = makeWorld();
     tap.start();

@@ -195,10 +195,12 @@
           card.dataset.sourceId = source.id;
           card.setAttribute('aria-selected', String(source.id === selectedId));
 
-          const thumb = document.createElement('img');
+          const thumb = document.createElement(source.thumbnail ? 'img' : 'div');
           thumb.className = 'thumb';
-          thumb.src = source.thumbnail || '';
-          thumb.alt = '';
+          if (source.thumbnail) {
+            thumb.src = source.thumbnail;
+            thumb.alt = '';
+          }
           card.append(thumb);
 
           const meta = document.createElement('div');
@@ -251,23 +253,31 @@
 
       (async () => {
         const payload = await bridge.pickerSources();
-        sources = Array.isArray(payload) ? payload : payload?.sources ?? [];
+        sources = payload.sources;
         setFilter(sources.some((s) => typeOf(s.id) === 'screen') ? 'screen' : 'all');
       })();
 
-      // Live thumbnail refresh: the main process re-captures every few seconds and pushes only
-      // the thumbnails that changed. We patch those <img> elements in place so the grid stays
-      // responsive instead of re-rendering from scratch.
+      // Keep thumbnail-only updates in place; rebuild cards when sources or metadata change.
       bridge.onPickerRefresh((payload) => {
-        const updated = Array.isArray(payload) ? payload : payload?.sources ?? [];
-        if (updated.length === 0) return;
-        const byId = new Map(updated.map((s) => [s.id, s]));
-        for (const source of sources) {
-          const fresh = byId.get(source.id);
-          if (!fresh || fresh.thumbnail === source.thumbnail) continue;
-          source.thumbnail = fresh.thumbnail;
-          const img = grid.querySelector(`[data-source-id="${CSS.escape(source.id)}"] img.thumb`);
-          if (img) img.src = fresh.thumbnail ?? '';
+        const removed = new Set(payload.removed);
+        const byId = new Map(sources.filter((source) => !removed.has(source.id)).map((source) => [source.id, source]));
+        let rebuild = removed.size > 0;
+        for (const fresh of payload.sources) {
+          const old = byId.get(fresh.id);
+          if (!old || old.name !== fresh.name || old.icon !== fresh.icon || Boolean(old.thumbnail) !== Boolean(fresh.thumbnail)) {
+            rebuild = true;
+          }
+          byId.set(fresh.id, fresh);
+        }
+        sources = [...byId.values()];
+        if (!visible().some((source) => source.id === selectedId)) selectedId = null;
+        if (rebuild) {
+          render();
+          return;
+        }
+        for (const fresh of payload.sources) {
+          const img = grid.querySelector(`[data-source-id="${CSS.escape(fresh.id)}"] img.thumb`);
+          if (img) img.src = fresh.thumbnail;
         }
       });
     </script>
