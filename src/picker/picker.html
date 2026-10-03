@@ -179,6 +179,7 @@
 
       const render = () => {
         const list = visible();
+        const focusedId = document.activeElement?.dataset?.sourceId;
         grid.replaceChildren();
 
         if (list.length === 0) {
@@ -226,6 +227,10 @@
         }
 
         share.disabled = selectedId === null;
+        if (focusedId) {
+          const restoreId = list.some((source) => source.id === focusedId) ? focusedId : selectedId;
+          if (restoreId) grid.querySelector(`[data-source-id="${CSS.escape(restoreId)}"]`)?.focus({ preventScroll: true });
+        }
       };
 
       const setFilter = (next) => {
@@ -257,27 +262,29 @@
         setFilter(sources.some((s) => typeOf(s.id) === 'screen') ? 'screen' : 'all');
       })();
 
-      // Keep thumbnail-only updates in place; rebuild cards when sources or metadata change.
+      // Full snapshots include new/closed windows and metadata changes. Thumbnail-only
+      // updates stay in place so refreshes do not interrupt selection or keyboard focus.
       bridge.onPickerRefresh((payload) => {
-        const removed = new Set(payload.removed);
-        const byId = new Map(sources.filter((source) => !removed.has(source.id)).map((source) => [source.id, source]));
-        let rebuild = removed.size > 0;
-        for (const fresh of payload.sources) {
-          const old = byId.get(fresh.id);
-          if (!old || old.name !== fresh.name || old.icon !== fresh.icon || Boolean(old.thumbnail) !== Boolean(fresh.thumbnail)) {
-            rebuild = true;
-          }
-          byId.set(fresh.id, fresh);
-        }
-        sources = [...byId.values()];
+        const updated = payload.sources;
+        const previous = sources;
+        const structureChanged = updated.length !== previous.length || updated.some((source, index) => {
+          const before = previous[index];
+          return source.id !== before?.id || source.name !== before?.name || source.icon !== before?.icon;
+        });
+        sources = updated;
         if (!visible().some((source) => source.id === selectedId)) selectedId = null;
-        if (rebuild) {
+        if (structureChanged) {
           render();
           return;
         }
-        for (const fresh of payload.sources) {
-          const img = grid.querySelector(`[data-source-id="${CSS.escape(fresh.id)}"] img.thumb`);
-          if (img) img.src = fresh.thumbnail;
+        for (let index = 0; index < sources.length; index += 1) {
+          const source = sources[index];
+          if (source.thumbnail === previous[index].thumbnail) continue;
+          const img = grid.querySelector(`[data-source-id="${CSS.escape(source.id)}"] img.thumb`);
+          if (img) {
+            if (source.thumbnail) img.src = source.thumbnail;
+            else img.removeAttribute('src');
+          }
         }
       });
     </script>

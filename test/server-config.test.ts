@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { normalizeServerUrl, readServerUrl, saveServerUrl } from '../src/main/server-config';
+import { isServerOrigin, normalizeServerUrl, readServerUrl, saveServerUrl } from '../src/main/server-config';
 
 const tempConfigPath = (): string => join(mkdtempSync(join(tmpdir(), 'sharkord-server-')), 'config.json');
 
@@ -21,6 +21,22 @@ describe('normalizeServerUrl', () => {
     expect(normalizeServerUrl('ftp://example.com')).toBeNull();
     expect(normalizeServerUrl('https://user:secret@example.com')).toBeNull();
     expect(normalizeServerUrl('not a url at all')).toBeNull();
+  });
+});
+
+describe('server permission origins', () => {
+  it.each([
+    ['https://chat.example.com/channel/1', 'https://chat.example.com', true],
+    ['https://CHAT.example.com:443/', 'https://chat.example.com', true],
+    ['https://chat.example.com.attacker.test/', 'https://chat.example.com', false],
+    ['https://chat.example.com@attacker.test/', 'https://chat.example.com', false],
+    ['http://localhost:49910/', 'http://localhost:4991', false],
+    ['http://chat.example.com/', 'https://chat.example.com', false],
+    ['file:///tmp/client.html', 'https://chat.example.com', false],
+    ['not a URL', 'https://chat.example.com', false],
+    ['https://chat.example.com/', '', false]
+  ])('checks %s against %s', (url, origin, allowed) => {
+    expect(isServerOrigin(url, origin)).toBe(allowed);
   });
 });
 

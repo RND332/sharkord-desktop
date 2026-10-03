@@ -204,7 +204,7 @@ export class TapCapture {
   }
 
   start(): void {
-    if (this.child) return;
+    if (this.child || this.timer) return;
     this.stopping = false;
     this.reconciling = null;
     this.reconcileGeneration += 1;
@@ -370,6 +370,7 @@ export class TapCapture {
 
     this.child = child;
     this.linked.clear();
+    this.tappedPids.clear();
 
     child.stdout?.on('data', (chunk) => {
       if (this.child !== child || this.stopping) return;
@@ -384,6 +385,13 @@ export class TapCapture {
       settled = true;
       this.child = null;
       this.reconciling = null;
+      this.reconcileGeneration += 1;
+      if (this.pollTimer) {
+        clearInterval(this.pollTimer);
+        this.pollTimer = null;
+      }
+      this.linked.clear();
+      this.tappedPids.clear();
       return true;
     };
 

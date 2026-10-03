@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
+import { PickerPayload } from '../main/picker';
 
 type PcmHandler = (event: unknown, chunk: Uint8Array, sessionId?: number) => void;
 
@@ -47,8 +48,8 @@ const bridge = {
   /** Used by the built-in picker window. */
   pickerSources: (): Promise<unknown> => ipcRenderer.invoke('picker:sources'),
   pickerChoose: (id: string | null): Promise<boolean> => ipcRenderer.invoke('picker:choose', id),
-  onPickerRefresh: (callback: (payload: { sources: Array<{ id: string; name: string; thumbnail: string | null; icon: string | null }>; removed: string[] }) => void): (() => void) => {
-    const handler = (_event: unknown, payload: { sources: Array<{ id: string; name: string; thumbnail: string | null; icon: string | null }>; removed: string[] }) => callback(payload);
+  onPickerRefresh: (callback: (payload: PickerPayload) => void): (() => void) => {
+    const handler = (_event: unknown, payload: PickerPayload) => callback(payload);
     ipcRenderer.on('picker:refresh', handler as never);
     return () => {
       ipcRenderer.off('picker:refresh', handler as never);

@@ -6,6 +6,7 @@ import { displayCapturerRequest, pickDisplaySource, registerPickerIpc } from '..
 type TestWindow = {
   destroyed: boolean;
   messages: Array<{ channel: string; payload: unknown }>;
+  webContents: { mainFrame: object };
   destroy(): void;
 };
 
@@ -22,6 +23,7 @@ vi.mock('electron', () => {
       destroyed = false;
       messages: TestWindow['messages'] = [];
       webContents = {
+        mainFrame: {},
         send: (channel: string, payload: unknown) => this.messages.push({ channel, payload })
       };
       constructor() {
@@ -63,7 +65,8 @@ const capturer = displayCapturerRequest({
 });
 
 const choose = (id: string | null): void => {
-  electron.handlers.get('picker:choose')?.({}, id);
+  const window = electron.windows.at(-1)!;
+  electron.handlers.get('picker:choose')?.({ sender: window.webContents, senderFrame: window.webContents.mainFrame }, id);
 };
 
 const flush = async (): Promise<void> => {
@@ -97,7 +100,6 @@ describe('picker lifecycle', () => {
       channel: 'picker:refresh',
       payload: {
         sources: [{ id: 'window:2:0', name: 'Presentation', thumbnail: null, icon: null }],
-        removed: ['window:1:0'],
         notice: null
       }
     }]);
@@ -116,7 +118,6 @@ describe('picker lifecycle', () => {
       channel: 'picker:refresh',
       payload: {
         sources: [{ id: 'window:1:0', name: 'Presentation — slide 2', thumbnail: null, icon: null }],
-        removed: [],
         notice: null
       }
     }]);
@@ -132,7 +133,7 @@ describe('picker lifecycle', () => {
 
     expect(electron.windows[0]!.messages).toEqual([{
       channel: 'picker:refresh',
-      payload: { sources: [], removed: ['window:1:0'], notice: null }
+      payload: { sources: [], notice: null }
     }]);
     choose('window:1:0');
     expect(await picked).toBeNull();
@@ -176,5 +177,15 @@ describe('picker lifecycle', () => {
 
     expect(electron.windows[0]!.destroyed).toBe(true);
     expect(await picked).toBeNull();
+  });
+
+  it('rejects a choice from another window without dismissing the picker', async () => {
+    const original = source('window:1:0', 'Presentation');
+    const picked = pickDisplaySource(null, [original], capturer);
+    await flush();
+
+    expect(electron.handlers.get('picker:choose')!({ sender: {}, senderFrame: {} }, null)).toBe(false);
+    choose('window:1:0');
+    expect(await picked).toBe(original);
   });
 });

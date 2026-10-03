@@ -87,15 +87,24 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
     return windowsShareRelease;
   };
 
-  /** Preserve the settings-selected frame rate while telling the encoder that smooth motion matters. */
-  const favorMotion = (stream: MediaStream): void => {
+  /** Keep the native capture's selected FPS when neither the source nor our preview is visible. */
+  const configureDisplayVideo = async (stream: MediaStream): Promise<void> => {
     for (const track of stream.getVideoTracks()) {
-      const video = track as MediaStreamTrack & { contentHint?: string };
-      if (!('contentHint' in video)) continue;
       try {
-        video.contentHint = 'motion';
+        track.contentHint = 'motion';
       } catch {
         // An optional encoder hint must never make a share fail.
+      }
+      const frameRate = track.getSettings().frameRate;
+      if (frameRate === undefined || frameRate <= 0) continue;
+      try {
+        // getDisplayMedia forbids min/exact; apply the floor after the user chooses a source.
+        await track.applyConstraints({
+          ...track.getConstraints(),
+          frameRate: { min: frameRate, ideal: frameRate, max: frameRate }
+        });
+      } catch (error) {
+        log('could not retain the selected capture frame rate', { frameRate, error });
       }
     }
   };
@@ -225,7 +234,7 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
     const wantsAudio = Boolean(constraints.audio);
     if (!wantsAudio) {
       const stream = await originalGetDisplayMedia(constraints);
-      favorMotion(stream);
+      await configureDisplayVideo(stream);
       return stream;
     }
     if (windows) {
@@ -237,7 +246,7 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
     let stream: MediaStream;
     try {
       stream = await originalGetDisplayMedia({ ...constraints, audio: true });
-      favorMotion(stream);
+      await configureDisplayVideo(stream);
     } catch (error) {
       windowsShareOpen = false;
       throw error;

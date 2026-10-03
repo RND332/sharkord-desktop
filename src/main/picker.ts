@@ -25,6 +25,8 @@ type Pending = {
   notice: string | null;
   resolve: (id: string | null) => void;
   refreshTimer: NodeJS.Timeout | null;
+  refreshing: boolean;
+  settled: boolean;
   capturerRequest: DisplayCapturerRequest;
   window: BrowserWindow;
   /** Latest full capturer sources — a window that appeared mid-refresh can still be chosen. */
@@ -72,22 +74,24 @@ export const resolveChoice = (
 
 /** Called once at startup; the picker page talks to these. */
 export const registerPickerIpc = (): void => {
-  ipcMain.handle('picker:sources', (): PickerPayload => ({
-    sources: pending?.sources ?? [],
-    notice: pending?.notice ?? null
+  ipcMain.handle('picker:sources', (event): PickerPayload => ({
+    sources: event.sender === pending?.window.webContents ? pending.sources : [],
+    notice: event.sender === pending?.window.webContents ? pending.notice : null
   }));
-  ipcMain.handle('picker:choose', (_event, id: unknown) => {
-    const finish = pending?.resolve;
-    stopRefresh(pending);
-    finish?.(typeof id === 'string' ? id : null);
+  ipcMain.handle('picker:choose', (event, id: unknown) => {
+    const active = pending;
+    if (!active || event.sender !== active.window.webContents || event.senderFrame !== event.sender.mainFrame) return false;
+    active.settled = true;
+    stopRefresh(active);
+    active.resolve(typeof id === 'string' ? id : null);
     return true;
   });
 };
 
-const stopRefresh = (request: Pending | null): void => {
-  if (request?.refreshTimer) {
-    clearInterval(request.refreshTimer);
-    request.refreshTimer = null;
+const stopRefresh = (active: Pending): void => {
+  if (active.refreshTimer) {
+    clearInterval(active.refreshTimer);
+    active.refreshTimer = null;
   }
 };
 
@@ -99,52 +103,41 @@ const fetchSources = async (capturerRequest: DisplayCapturerRequest): Promise<De
   });
 };
 
-/** Send changed metadata and removed IDs without resending unchanged thumbnails. */
-const pushRefreshed = (request: Pending, fresh: PickerSource[]): void => {
-  const previous = new Map(request.sources.map((source) => [source.id, source]));
-  const currentIds = new Set(fresh.map((source) => source.id));
-  const removed = request.sources.filter((source) => !currentIds.has(source.id)).map((source) => source.id);
-  const changed = fresh.filter((source) => {
-    const old = previous.get(source.id);
-    return !old || old.name !== source.name || old.thumbnail !== source.thumbnail || old.icon !== source.icon;
+/** Send a full source snapshot only when membership, metadata, or thumbnails change. */
+const pushRefreshed = (active: Pending, fresh: PickerSource[]): void => {
+  const previous = active.sources;
+  const changed = fresh.length !== previous.length || fresh.some((source, index) => {
+    const before = previous[index];
+    return source.id !== before?.id || source.name !== before?.name ||
+      source.thumbnail !== before?.thumbnail || source.icon !== before?.icon;
   });
-
-  request.sources = fresh;
-  if (changed.length === 0 && removed.length === 0) return;
-
-  request.window.webContents.send('picker:refresh', {
-    sources: changed,
-    removed,
-    notice: request.notice
-  } satisfies PickerPayload & { removed: string[] });
+  active.sources = fresh;
+  if (changed) {
+    active.window.webContents.send('picker:refresh', { sources: fresh, notice: active.notice } satisfies PickerPayload);
+  }
 };
 
-const startRefresh = (request: Pending): void => {
-  stopRefresh(request);
-  const window = request.window;
-  let refreshing = false;
-
-  request.refreshTimer = setInterval(() => {
-    if (pending !== request || window.isDestroyed()) {
-      stopRefresh(request);
+const startRefresh = (active: Pending): void => {
+  stopRefresh(active);
+  active.refreshTimer = setInterval(() => {
+    if (pending !== active || active.settled || active.window.isDestroyed()) {
+      stopRefresh(active);
       return;
     }
-    if (refreshing) return;
-    refreshing = true;
-    void fetchSources(request.capturerRequest)
+    if (active.refreshing) return;
+    active.refreshing = true;
+    void fetchSources(active.capturerRequest)
       .then((freshSources) => {
-        if (pending !== request || window.isDestroyed()) return;
-        request.latestSources = freshSources;
-        pushRefreshed(request, describeSources(freshSources));
+        if (pending !== active || active.settled || active.window.isDestroyed()) return;
+        active.latestSources = freshSources;
+        pushRefreshed(active, describeSources(freshSources));
       })
       .catch(() => {
         // Ignore transient capture errors between refresh cycles.
       })
-      .finally(() => {
-        refreshing = false;
-      });
+      .finally(() => { active.refreshing = false; });
   }, REFRESH_INTERVAL_MS);
-  request.refreshTimer.unref();
+  active.refreshTimer.unref();
 };
 
 /**
@@ -182,21 +175,23 @@ export const pickDisplaySource = async (
   });
 
   const choice = Promise.withResolvers<string | null>();
-  const request: Pending = {
+  const active: Pending = {
     sources: describeSources(initialSources),
     notice,
     resolve: choice.resolve,
     refreshTimer: null,
+    refreshing: false,
+    settled: false,
     capturerRequest,
     window: picker,
     latestSources: initialSources
   };
-  pending = request;
-
+  pending = active;
   picker.on('closed', () => {
-    stopRefresh(request);
-    if (pending === request) pending = null;
-    choice.resolve(null);
+    active.settled = true;
+    stopRefresh(active);
+    if (pending === active) pending = null;
+    active.resolve(null);
   });
 
   try {
@@ -204,16 +199,18 @@ export const pickDisplaySource = async (
     if (picker.isDestroyed()) return null;
     picker.show();
     // Start the live refresh loop now that the renderer is ready to receive updates.
-    startRefresh(request);
+    startRefresh(active);
   } catch (error) {
     log('picker failed to load:', error);
-    choice.resolve(null);
+    active.resolve(null);
   }
 
   const id = await choice.promise;
-  const resolvedSources = request.latestSources;
-  stopRefresh(request);
-  if (pending === request) pending = null;
+  // Capture the most recent source list before destroying the window — windows that appeared
+  // during the live refresh are in latestSources but not in the initial snapshot.
+  const resolvedSources = active.latestSources;
+  stopRefresh(active);
+  if (pending === active) pending = null;
   if (!picker.isDestroyed()) picker.destroy();
   const picked = resolveChoice(resolvedSources, id);
   log('picker result:', picked ? picked.name : 'cancelled');

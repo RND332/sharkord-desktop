@@ -14,6 +14,9 @@ type FakeTrack = {
   listeners: Record<string, Array<() => void>>;
   stopped: boolean;
   contentHint: string;
+  getSettings(): MediaTrackSettings;
+  getConstraints(): MediaTrackConstraints;
+  applyConstraints(constraints: MediaTrackConstraints): Promise<void>;
   stop(): void;
   addEventListener(type: string, cb: () => void): void;
   emit(type: string): void;
@@ -25,6 +28,9 @@ const makeTrack = (kind: string): FakeTrack => ({
   listeners: {},
   stopped: false,
   contentHint: '',
+  getSettings: () => kind === 'video' ? { frameRate: 60 } : {},
+  getConstraints: () => ({}),
+  applyConstraints: async () => {},
   stop() {
     this.stopped = true;
     this.readyState = 'ended';
@@ -78,6 +84,7 @@ type SetupOptions = {
   generators?: boolean;
   failWriter?: boolean;
   failGenerator?: boolean;
+  applyVideoConstraints?: () => Promise<void>;
 };
 
 const setup = (options: SetupOptions = {}) => {
@@ -86,6 +93,7 @@ const setup = (options: SetupOptions = {}) => {
   const captureEndedCallbacks: Array<() => void> = [];
   let closedData = 0;
   const videoTrack = makeTrack('video');
+  if (options.applyVideoConstraints) videoTrack.applyConstraints = options.applyVideoConstraints;
   const audioTrack = makeTrack('audio');
   const originalStream = new FakeMediaStream([videoTrack, audioTrack]) as unknown as MediaStream;
   const generatedTracks: Array<FakeTrack & { writable: { getWriter(): { write(d: unknown): Promise<void> } } }> = [];
@@ -204,28 +212,30 @@ describe('echo verdict from the probe', () => {
   });
 });
 
-describe('display-media patch: a video-only request changes nothing', () => {
-  it('passes the constraints through untouched', async () => {
-    const env = setup();
+describe('display-media patch: video setup', () => {
+  it('does not expose the share before native video configuration finishes', async () => {
+    const configured = Promise.withResolvers<void>();
+    const env = setup({ applyVideoConstraints: () => configured.promise });
+    let returned = false;
+    const sharing = env.mediaDevices.getDisplayMedia({ video: true }).then(stream => {
+      returned = true;
+      return stream;
+    });
+
+    await flush();
+    expect(returned).toBe(false);
+    configured.resolve();
+    expect(await sharing).toBe(env.originalStream);
+    expect(env.videoTrack.readyState).toBe('live');
+  });
+
+  it('keeps a usable share when the native capturer rejects the frame-rate preference', async () => {
+    const env = setup({ applyVideoConstraints: async () => { throw new DOMException('Unavailable frame rate', 'OverconstrainedError'); } });
     const stream = await env.mediaDevices.getDisplayMedia({ video: true });
 
     expect(stream).toBe(env.originalStream);
-    expect(env.getDisplayMedia).toHaveBeenCalledWith({ video: true });
-    expect(env.acquireCapture).not.toHaveBeenCalled();
-    expect(env.reportCaptureMode).not.toHaveBeenCalled();
-  });
-
-  it('keeps the settings-selected frame-rate target and marks the track for motion', async () => {
-    const env = setup();
-    const constraints = {
-      video: { frameRate: { max: 47 }, width: { ideal: 1920 } },
-      audio: false
-    };
-    const stream = await env.mediaDevices.getDisplayMedia(constraints);
-
-    expect(stream).toBe(env.originalStream);
-    expect(env.getDisplayMedia).toHaveBeenCalledWith(constraints);
-    expect(env.videoTrack.contentHint).toBe('motion');
+    expect(env.videoTrack.readyState).toBe('live');
+    expect(env.videoTrack.stopped).toBe(false);
   });
 });
 

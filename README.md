@@ -85,6 +85,11 @@ HTTP(S) links the client opens in a new window, and clicked cross-origin links, 
 default system browser instead of Electron child windows. Same-origin in-app navigation is preserved,
 and non-web schemes (`file:`, `javascript:` and the like) are never handed to the OS.
 
+Permissions are scoped to the configured server's exact origin and the main client WebContents;
+look-alike host/port prefixes and foreign-origin frames are not trusted. Display-source requests
+must come from the main frame. Reloading, navigating to a new document, or losing the renderer stops
+native capture and invalidates pending source acquisition; closing to the tray does not.
+
 ## Usage
 
 ```bash
@@ -160,7 +165,7 @@ to system DNS or an inherited proxy.
 
 `bun run selftest` on Linux plays a 997 Hz tone *inside the app window* and a 1493 Hz tone from an
 unrelated process, then measures the tap, the real patched `getDisplayMedia` audio track and a
-hardware-monitor positive control (last run, 2026-09-13):
+hardware-monitor positive control (last run, 2026-10-03):
 
 | signal | another app's tone (must be captured) | the client's own tone (must not leak) |
 |---|---|---|
@@ -176,7 +181,9 @@ regression check, **not Windows WASAPI or a remote viewer verification**.
 link planner (mono fan-out, own-process exclusion, idempotency, links forgotten when a stream
 disappears), the PCM framing (byte-exact carry, per-channel RMS, Goertzel selectivity), patch
 behaviour (passthrough, merge, fallback, backpressure, release), the server configuration (URL
-normalisation, hostile configs, storage round-trip) and the platform mode.
+normalisation, exact-origin permission matching, hostile configs, storage round-trip), recorder
+restart/terminal-failure cleanup, picker request ownership and stale-refresh isolation, and the
+platform mode.
 
 Picker lifecycle regressions cover newly opened, renamed and closed windows, stale refreshes after
 cancellation, overlapping requests and failed picker-page loads. Recorder lifecycle tests also reject
@@ -213,14 +220,49 @@ The in-app picker refreshes window names, icons and availability as well as thum
 selected window clears the selection and disables Share; newly opened windows become selectable
 without reopening the picker. Sources without thumbnails keep a blank preview rather than a broken
 image. Only one picker can be open at a time. Canceling rejects the media request once without an
-unhandled main-process error, and another share can start immediately.
+unhandled main-process error, and another share can start immediately. Thumbnail-only updates reuse
+the existing cards without interrupting keyboard focus. Refreshes do not overlap, and a closed
+picker's delayed result cannot affect a new picker.
 
 Native audio capture belongs to the client document: reloading, changing servers or losing the
 renderer stops it, including on Linux. In-page navigation and hiding the window to the tray preserve
 an active capture.
 
+### Background window-share frame rate (0.6.11)
+
+After the user selects a source, Sharkord retains the native track's selected frame rate with
+[`MediaStreamTrack.applyConstraints()`](https://developer.mozilla.org/en-US/docs/Web/API/MediaStreamTrack/applyConstraints).
+The floor is applied after selection because `getDisplayMedia()` forbids `min`/`exact` constraints.
+Existing resolution constraints, the original video track, and the audio path are preserved.
+This uses the same browser API on Linux, Windows and macOS; it changes no desktop settings or
+other application's flags. If the native capturer rejects the preference, the share remains usable
+and a diagnostic is logged instead of failing the request.
+
+Verified with a real Chrome window, native Wayland capture and a WebRTC loopback receiver on
+Electron 44.3.0 / Hyprland 0.56.2. With both Chrome and Sharkord on hidden workspaces, the
+60-FPS share improved from approximately **35 to 59 captured/decoded FPS**; receiver painting
+improved from approximately **34 to 50 FPS** in the software-rendered test environment.
+The source produced approximately 53 animation frames per second after the fix, so decoded
+FPS does not imply 60 distinct animation frames. A 30-FPS share retained approximately 30 FPS
+and its `width.max` constraint through the same workspace transitions, including an audio request.
+A Helium 0.17.2.1 share with audio retained approximately 58 captured/decoded FPS with both windows
+hidden, including after the web client changed `contentHint` back to `detail`; received audio packet
+and sample counters continued advancing. This transport check is not an audio-fidelity measurement.
+All follow-up GUI probes ran in a private headless compositor with private profiles, DBus,
+PipeWire and portals, disconnected from the user's desktop.
+The built-in tone-exclusion self-test also passed with a private virtual sink: external tone
+amplitude 0.350 at both the tap and injected track, own-client tone 0.000, and control tone 0.350.
+No test audio was routed to a host device.
+
+Windows/macOS use the same implementation, but native workspace-switch FPS on those systems
+has not been runtime-verified. Release packaging checks are not that proof.
+
 ## Known limits
 
+- **Source-rendering limits still apply**: the frame-rate floor prevents the measured background
+  capture slowdown; it cannot force another application to animate a minimized/suspended window,
+  overcome GPU/encoder overload, or guarantee distinct frames at the selected rate. Sharkord does
+  not change compositor rules, global browser policies or power settings.
 - **Windows 10 window share can freeze Explorer**: Chromium's window capturer is always
   Windows.Graphics.Capture. On some Windows 10 + GPU driver combinations that wedges DWM —
   Alt+Tab, the Start menu and the taskbar stop responding — until `explorer.exe` is restarted

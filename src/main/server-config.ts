@@ -30,6 +30,16 @@ export const normalizeServerUrl = (input: string): string | null => {
   return `${url.origin}${path}`;
 };
 
+/** Permission URLs must match the server's origin, not a hostname or port prefix. */
+export const isServerOrigin = (input: string, origin: string): boolean => {
+  if (!origin) return false;
+  try {
+    return new URL(input).origin === origin;
+  } catch {
+    return false;
+  }
+};
+
 export const readServerUrl = (path: string): string | null => {
   try {
     const stored = JSON.parse(readFileSync(path, 'utf8')) as Partial<StoredServer>;
