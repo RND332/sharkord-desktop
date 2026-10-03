@@ -179,6 +179,7 @@
 
       const render = () => {
         const list = visible();
+        const focusedId = document.activeElement?.dataset?.sourceId;
         grid.replaceChildren();
 
         if (list.length === 0) {
@@ -197,7 +198,7 @@
 
           const thumb = document.createElement('img');
           thumb.className = 'thumb';
-          thumb.src = source.thumbnail || '';
+          if (source.thumbnail) thumb.src = source.thumbnail;
           thumb.alt = '';
           card.append(thumb);
 
@@ -224,6 +225,10 @@
         }
 
         share.disabled = selectedId === null;
+        if (focusedId) {
+          const restoreId = list.some((source) => source.id === focusedId) ? focusedId : selectedId;
+          if (restoreId) grid.querySelector(`[data-source-id="${CSS.escape(restoreId)}"]`)?.focus({ preventScroll: true });
+        }
       };
 
       const setFilter = (next) => {
@@ -255,19 +260,29 @@
         setFilter(sources.some((s) => typeOf(s.id) === 'screen') ? 'screen' : 'all');
       })();
 
-      // Live thumbnail refresh: the main process re-captures every few seconds and pushes only
-      // the thumbnails that changed. We patch those <img> elements in place so the grid stays
-      // responsive instead of re-rendering from scratch.
+      // Full snapshots include new/closed windows and metadata changes. Thumbnail-only
+      // updates stay in place so refreshes do not interrupt selection or keyboard focus.
       bridge.onPickerRefresh((payload) => {
         const updated = Array.isArray(payload) ? payload : payload?.sources ?? [];
-        if (updated.length === 0) return;
-        const byId = new Map(updated.map((s) => [s.id, s]));
-        for (const source of sources) {
-          const fresh = byId.get(source.id);
-          if (!fresh || fresh.thumbnail === source.thumbnail) continue;
-          source.thumbnail = fresh.thumbnail;
+        const previous = sources;
+        const structureChanged = updated.length !== previous.length || updated.some((source, index) => {
+          const before = previous[index];
+          return source.id !== before?.id || source.name !== before?.name || source.icon !== before?.icon;
+        });
+        sources = updated;
+        if (!visible().some((source) => source.id === selectedId)) selectedId = visible()[0]?.id ?? null;
+        if (structureChanged) {
+          render();
+          return;
+        }
+        for (let index = 0; index < sources.length; index += 1) {
+          const source = sources[index];
+          if (source.thumbnail === previous[index].thumbnail) continue;
           const img = grid.querySelector(`[data-source-id="${CSS.escape(source.id)}"] img.thumb`);
-          if (img) img.src = fresh.thumbnail ?? '';
+          if (img) {
+            if (source.thumbnail) img.src = source.thumbnail;
+            else img.removeAttribute('src');
+          }
         }
       });
     </script>

@@ -306,6 +306,42 @@ describe('TapCapture', () => {
     tap.stop();
   });
 
+  it('does not spawn a second recorder when acquired during restart backoff', () => {
+    const { tap, spawns, emitSpawnError } = makeWorld();
+    tap.start();
+    emitSpawnError(Object.assign(new Error('temporarily unavailable'), { code: 'EAGAIN' }));
+    tap.start();
+    expect(spawns).toHaveLength(1);
+    vi.advanceTimersByTime(250);
+    expect(spawns).toHaveLength(2);
+    vi.advanceTimersByTime(500);
+    expect(spawns).toHaveLength(2);
+    tap.stop();
+  });
+
+  it('stops graph polling after a terminal recorder failure', async () => {
+    let dumps = 0;
+    let fail!: (error: Error) => void;
+    const tap = new TapCapture({
+      runner: async () => { dumps += 1; return PW_DUMP; },
+      spawner: () => ({
+        stdout: null, stderr: null, kill: () => {},
+        on: (event, callback) => {
+          if (event === 'error') fail = callback as (error: Error) => void;
+        }
+      }),
+      pollMs: 100
+    });
+    tap.start();
+    await tap.reconcile();
+    fail(Object.assign(new Error('missing recorder'), { code: 'ENOENT' }));
+    const before = dumps;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(dumps).toBe(before);
+    expect(vi.getTimerCount()).toBe(0);
+    tap.stop();
+  });
+
   it('clears its state when stopped', async () => {
     const { tap } = makeWorld();
     tap.start();

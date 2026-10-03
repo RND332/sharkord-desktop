@@ -81,6 +81,11 @@ HTTP(S) links the client opens in a new window, and clicked cross-origin links, 
 default system browser instead of Electron child windows. Same-origin in-app navigation is preserved,
 and non-web schemes (`file:`, `javascript:` and the like) are never handed to the OS.
 
+Permissions are scoped to the configured server's exact origin and the main client WebContents;
+look-alike host/port prefixes and foreign-origin frames are not trusted. Display-source requests
+must come from the main frame. Reloading, navigating to a new document, or losing the renderer stops
+native capture and invalidates pending source acquisition; closing to the tray does not.
+
 ## Usage
 
 ```bash
@@ -156,7 +161,7 @@ to system DNS or an inherited proxy.
 
 `bun run selftest` on Linux plays a 997 Hz tone *inside the app window* and a 1493 Hz tone from an
 unrelated process, then measures the tap, the real patched `getDisplayMedia` audio track and a
-hardware-monitor positive control (last run, 2026-09-13):
+hardware-monitor positive control (last run, 2026-10-03):
 
 | signal | another app's tone (must be captured) | the client's own tone (must not leak) |
 |---|---|---|
@@ -172,7 +177,9 @@ regression check, **not Windows WASAPI or a remote viewer verification**.
 link planner (mono fan-out, own-process exclusion, idempotency, links forgotten when a stream
 disappears), the PCM framing (byte-exact carry, per-channel RMS, Goertzel selectivity), patch
 behaviour (passthrough, merge, fallback, backpressure, release), the server configuration (URL
-normalisation, hostile configs, storage round-trip) and the platform mode.
+normalisation, exact-origin permission matching, hostile configs, storage round-trip), recorder
+restart/terminal-failure cleanup, picker request ownership and stale-refresh isolation, and the
+platform mode.
 
 `bun run test:windows-audio` is the separate real-Windows proof. Three independent application
 windows own child processes playing 997, 1493 and 2137 Hz tones. The script measures both PCM
@@ -201,8 +208,21 @@ asks the user:
 
 `SHARKORD_PICKER=inapp|system` forces either picker (useful when a compositor's portal misbehaves).
 
+The in-app picker reconciles complete source snapshots: new, removed and renamed sources are
+reflected without losing a still-valid selection or keyboard focus. Thumbnail-only updates reuse
+the existing cards. Refreshes do not overlap, and a closed picker's delayed result cannot affect a
+new picker.
+
 ## Known limits
 
+- **Hidden/minimized source windows can lose FPS on any OS**: Sharkord keeps its own renderer
+  unthrottled, but cannot force another application or the compositor to keep drawing a hidden
+  window. On Hyprland 0.56.2, a hidden Chrome canvas stopped producing frames; a native
+  [`render_unfocused` window rule](https://wiki.hypr.land/Configuring/Basics/Window-Rules/)
+  restored roughly 15 FPS, capped by `misc.render_unfocused_fps` (15 in the tested configuration).
+  This is an OS-specific source-rendering limit, not a portable client fix or a remote-viewer FPS
+  measurement. Keep the source visible for reliable demos; desktop/browser policy changes require
+  platform-specific verification and can increase GPU use. Sharkord does not change those settings.
 - **Windows 10 window share can freeze Explorer**: Chromium's window capturer is always
   Windows.Graphics.Capture. On some Windows 10 + GPU driver combinations that wedges DWM —
   Alt+Tab, the Start menu and the taskbar stop responding — until `explorer.exe` is restarted

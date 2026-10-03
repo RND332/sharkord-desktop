@@ -21,7 +21,7 @@ import { loadConfig } from './config';
 import { describeEnvironment, getLogsDirectory, initializeLogging, log, readLogTail } from './logger';
 import { removeLegacyRouting } from './legacy';
 import { displayCapturerRequest, pickDisplaySource, registerPickerIpc } from './picker';
-import { normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
+import { isServerOrigin, normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
 import { runSelftest } from './selftest';
 import { TapCapture } from './tap';
 import { WindowsCapture, helperExists, windowsTargetForSource, type WindowsCaptureTarget } from './windows-capture';
@@ -73,6 +73,15 @@ let windowsCaptureSerial = 0;
 let activeWindowsSession: number | null = null;
 let captureDocument = 0;
 
+const stopDocumentCapture = (): void => {
+  captureDocument += 1;
+  activeWindowsSession = null;
+  selectingWindowsAudio = false;
+  acquiringWindowsAudio = false;
+  pendingWindowsTarget = null;
+  captureSource?.stop();
+};
+
 const installPermissionHandlers = (origin: () => string): void => {
   const allowed: Record<string, true> = {
     media: true,
@@ -82,19 +91,23 @@ const installPermissionHandlers = (origin: () => string): void => {
     notifications: true
   };
 
-  session.defaultSession.setPermissionRequestHandler((contents, permission, callback) => {
-    const fromApp = origin() !== '' && (contents?.getURL() ?? '').startsWith(origin());
+  session.defaultSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+    const fromApp = contents === mainWindow?.webContents && isServerOrigin(details.requestingUrl, origin());
     callback(fromApp && allowed[permission] === true);
   });
 
-  session.defaultSession.setPermissionCheckHandler((_contents, permission, requestingOrigin) => {
-    return origin() !== '' && requestingOrigin.startsWith(origin()) && allowed[permission] === true;
+  session.defaultSession.setPermissionCheckHandler((contents, permission, requestingOrigin) => {
+    return contents === mainWindow?.webContents && isServerOrigin(requestingOrigin, origin()) && allowed[permission] === true;
   });
 
   // Electron has no screen picker of its own. On Wayland `getSources` raises the desktop's own
   // dialog (Hyprland's share picker) and returns what the user chose there; everywhere else —
   // Windows, macOS, X11 — we have to ask ourselves, in a window like Discord's.
   session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    if (request.frame !== mainWindow?.webContents.mainFrame || !isServerOrigin(request.securityOrigin, origin())) {
+      callback({});
+      return;
+    }
     const windowsAudio = process.platform === 'win32' && request.audioRequested;
     const documentVersion = captureDocument;
     if (windowsAudio && (selectingWindowsAudio || acquiringWindowsAudio || activeWindowsSession !== null)) {
@@ -142,7 +155,7 @@ const installPermissionHandlers = (origin: () => string): void => {
       const picked = wantsSystemPicker
         ? sources[0] ?? null
         : await pickDisplaySource(mainWindow, sources, capturer, log, capturer.notice);
-      if (windowsAudio && documentVersion !== captureDocument) {
+      if (documentVersion !== captureDocument || request.frame !== mainWindow?.webContents.mainFrame) {
         callback({});
         return;
       }
@@ -266,7 +279,8 @@ const shutdown = async (code: number, options: { quit?: boolean } = {}): Promise
       log('installing the downloaded update on the way out');
       return;
     }
-    app.quit();
+    if (options.quit === false) app.exit(0);
+    else app.quit();
     return;
   }
   app.exit(code);
@@ -328,18 +342,17 @@ const bootstrap = async (): Promise<void> => {
       details.preventDefault();
       openExternal(link.href);
     });
-    window.webContents.on('did-navigate', () => {
-      if (!windowsCapture) return;
-      captureDocument += 1;
-      activeWindowsSession = null;
-      selectingWindowsAudio = false;
-      acquiringWindowsAudio = false;
-      windowsCapture.stop();
-      pendingWindowsTarget = null;
+    const stopWindowCapture = (): void => {
+      if (mainWindow === window) stopDocumentCapture();
+    };
+    window.webContents.on('did-start-navigation', (details) => {
+      if (details.isMainFrame && !details.isSameDocument) stopWindowCapture();
     });
+    window.webContents.on('render-process-gone', stopWindowCapture);
+    window.webContents.on('destroyed', stopWindowCapture);
     let mentionedTray = false;
     window.on('close', (event) => {
-      if (shuttingDown) return;
+      if (shuttingDown || !tray) return;
       log('window closed, staying in the tray');
       event.preventDefault();
       window.hide();
@@ -353,6 +366,7 @@ const bootstrap = async (): Promise<void> => {
       }
     });
     window.on('closed', () => {
+      stopWindowCapture();
       mainWindow = null;
       // A page can destroy its own window; with a tray around, bring the client back.
       if (shuttingDown || !tray) return;
@@ -417,21 +431,6 @@ const bootstrap = async (): Promise<void> => {
     );
     tray.on('click', showWindow);
 
-    let mentionedTray = false;
-    window.on('close', (event) => {
-      if (shuttingDown) return;
-      log('window closed, staying in the tray');
-      event.preventDefault();
-      window.hide();
-      if (!mentionedTray && Notification.isSupported()) {
-        mentionedTray = true;
-        log('telling the user the app is still in the tray');
-        new Notification({
-          title: 'Sharkord is still running',
-          body: 'Closing the window keeps it in the tray. Quit from the tray menu.'
-        }).show();
-      }
-    });
   } catch (error) {
     log('no system tray available, closing the window will quit:', error);
     window.on('closed', () => {
