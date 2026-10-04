@@ -135,7 +135,11 @@ describe('picker lifecycle', () => {
       channel: 'picker:refresh',
       payload: { sources: [], notice: null }
     }]);
-    choose('window:1:0');
+    const window = electron.windows[0]!;
+    expect(electron.handlers.get('picker:choose')!({
+      sender: window.webContents, senderFrame: window.webContents.mainFrame
+    }, 'window:1:0')).toBe(false);
+    choose(null);
     expect(await picked).toBeNull();
   });
 
@@ -186,6 +190,35 @@ describe('picker lifecycle', () => {
 
     expect(electron.handlers.get('picker:choose')!({ sender: {}, senderFrame: {} }, null)).toBe(false);
     choose('window:1:0');
+    expect(await picked).toBe(original);
+  });
+
+  it('rejects source access from a picker subframe without affecting the valid choice', async () => {
+    const original = source('window:1:0', 'Presentation');
+    const picked = pickDisplaySource(null, [original], capturer);
+    await flush();
+    const window = electron.windows[0]!;
+
+    expect(electron.handlers.get('picker:sources')!({
+      sender: window.webContents, senderFrame: {}
+    })).toEqual({ sources: [], notice: null });
+    choose(original.id);
+    expect(await picked).toBe(original);
+  });
+
+  it('rejects a stale choice without cancelling a remaining valid source', async () => {
+    const original = source('window:1:0', 'Presentation');
+    const removed = source('window:2:0', 'Closed editor');
+    electron.getSources.mockResolvedValue([original]);
+    const picked = pickDisplaySource(null, [original, removed], capturer);
+    await flush();
+    await vi.advanceTimersByTimeAsync(2000);
+    const window = electron.windows[0]!;
+
+    expect(electron.handlers.get('picker:choose')!({
+      sender: window.webContents, senderFrame: window.webContents.mainFrame
+    }, removed.id)).toBe(false);
+    choose(original.id);
     expect(await picked).toBe(original);
   });
 });

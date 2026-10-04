@@ -74,13 +74,17 @@ export const resolveChoice = (
 
 /** Called once at startup; the picker page talks to these. */
 export const registerPickerIpc = (): void => {
-  ipcMain.handle('picker:sources', (event): PickerPayload => ({
-    sources: event.sender === pending?.window.webContents ? pending.sources : [],
-    notice: event.sender === pending?.window.webContents ? pending.notice : null
-  }));
+  ipcMain.handle('picker:sources', (event): PickerPayload => {
+    const active = pending;
+    if (!active || event.sender !== active.window.webContents || event.senderFrame !== event.sender.mainFrame) {
+      return { sources: [], notice: null };
+    }
+    return { sources: active.sources, notice: active.notice };
+  });
   ipcMain.handle('picker:choose', (event, id: unknown) => {
     const active = pending;
     if (!active || event.sender !== active.window.webContents || event.senderFrame !== event.sender.mainFrame) return false;
+    if (typeof id === 'string' && !active.sources.some((source) => source.id === id)) return false;
     active.settled = true;
     stopRefresh(active);
     active.resolve(typeof id === 'string' ? id : null);

@@ -76,6 +76,7 @@ silent. Missing or failed native capture leaves the share video-only: Windows ne
 Chromium's whole-system loopback or uses a short tone probe as a substitute for isolation.
 
 Closing the window keeps the app in the tray (capture and voice stay connected) and says so once.
+If the tray is unavailable or fails during setup, closing quits instead of hiding an unreachable window.
 Quit from the **Quit Sharkord** tray item, the Server menu, or with Ctrl/Cmd+Q — all three paths are
 verified in CI-less local tests via `SHARKORD_DEBUG_QUIT_AFTER` / `SHARKORD_DEBUG_APP_QUIT_AFTER`. A downloaded update is swapped in on
 the way out **without** relaunching the app, so quitting really quits — set
@@ -89,6 +90,8 @@ Permissions are scoped to the configured server's exact origin and the main clie
 look-alike host/port prefixes and foreign-origin frames are not trusted. Display-source requests
 must come from the main frame. Reloading, navigating to a new document, or losing the renderer stops
 native capture and invalidates pending source acquisition; closing to the tray does not.
+Picker source enumeration and selection accept only the picker window's main frame; stale source IDs
+are rejected without dismissing a valid pending choice.
 
 ## Usage
 
@@ -186,8 +189,8 @@ restart/terminal-failure cleanup, picker request ownership and stale-refresh iso
 platform mode.
 
 Picker lifecycle regressions cover newly opened, renamed and closed windows, stale refreshes after
-cancellation, overlapping requests and failed picker-page loads. Recorder lifecycle tests also reject
-buffered PCM from a stopped or replaced process.
+cancellation, overlapping requests, failed picker-page loads, subframe source access, and stale choices
+followed by valid selection. Recorder lifecycle tests also reject buffered PCM from a stopped or replaced process.
 
 `bun run test:windows-audio` is the separate real-Windows proof. Three independent application
 windows own child processes playing 997, 1493 and 2137 Hz tones. The script measures both PCM
@@ -210,19 +213,22 @@ asks the user:
   `hyprland-preview-share-picker`, the portal on other compositors) and the source the user picked
   there is used. Electron's `useSystemPicker` option is macOS-only and unused.
 - **Windows, macOS, X11** — those have no such dialog, so the app shows its own picker window:
-  thumbnails of every screen and window, Screens/Windows/All tabs, first entry pre-selected,
-  Enter shares, Esc cancels. Until 0.4.0 this case silently took the first source, which on Windows
-  was usually the Sharkord window itself — that is fixed by the picker.
+  available previews, Screens/Windows/All tabs, and the first entry pre-selected. Enter or Space on
+  a source, double-click, or Share starts sharing; Enter on Cancel cancels, and Enter on a tab only
+  switches tabs. Esc cancels. Full source names are available as tooltips.
+  Until 0.4.0 this case silently took the first source, which on Windows was usually the Sharkord
+  window itself — that is fixed by the picker.
 
 `SHARKORD_PICKER=inapp|system` forces either picker (useful when a compositor's portal misbehaves).
 
 The in-app picker refreshes window names, icons and availability as well as thumbnails. Closing the
 selected window clears the selection and disables Share; newly opened windows become selectable
-without reopening the picker. Sources without thumbnails keep a blank preview rather than a broken
-image. Only one picker can be open at a time. Canceling rejects the media request once without an
-unhandled main-process error, and another share can start immediately. Thumbnail-only updates reuse
-the existing cards without interrupting keyboard focus. Refreshes do not overlap, and a closed
-picker's delayed result cannot affect a new picker.
+without reopening the picker. Sources without thumbnails use compact name/icon cards; a live preview
+can appear or disappear without recreating a card. Only one picker can be open at a time. Canceling
+rejects the media request once without an unhandled main-process error, and another share can start
+immediately. Selection and thumbnail-only updates preserve the existing cards and keyboard focus.
+If a focused source disappears, focus moves to Cancel rather than a different share source.
+Refreshes do not overlap, and a closed picker's delayed result cannot affect a new picker.
 
 Native audio capture belongs to the client document: reloading, changing servers or losing the
 renderer stops it, including on Linux. In-page navigation and hiding the window to the tray preserve
@@ -253,6 +259,10 @@ PipeWire and portals, disconnected from the user's desktop.
 The built-in tone-exclusion self-test also passed with a private virtual sink: external tone
 amplitude 0.350 at both the tap and injected track, own-client tone 0.000, and control tone 0.350.
 No test audio was routed to a host device.
+
+Keep all Sharkord debugging invisible: use an isolated virtual display or private headless compositor,
+disposable profiles, and isolated desktop/audio services. Do not launch debug windows or media probes
+in the user's working session.
 
 Windows/macOS use the same implementation, but native workspace-switch FPS on those systems
 has not been runtime-verified. Release packaging checks are not that proof.

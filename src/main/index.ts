@@ -355,7 +355,7 @@ const bootstrap = async (): Promise<void> => {
     window.webContents.on('destroyed', stopWindowCapture);
     let mentionedTray = false;
     window.on('close', (event) => {
-      if (shuttingDown || !tray) return;
+      if (shuttingDown || !tray || tray.isDestroyed()) return;
       log('window closed, staying in the tray');
       event.preventDefault();
       window.hide();
@@ -372,7 +372,7 @@ const bootstrap = async (): Promise<void> => {
       stopWindowCapture();
       mainWindow = null;
       // A page can destroy its own window; with a tray around, bring the client back.
-      if (shuttingDown || !tray) return;
+      if (shuttingDown || !tray || tray.isDestroyed()) return;
       log('window was destroyed, reopening it');
       const next = createWindow();
       void (currentServerUrl ? loadClient(currentServerUrl) : next.loadFile(connectPagePath));
@@ -435,6 +435,8 @@ const bootstrap = async (): Promise<void> => {
     tray.on('click', showWindow);
 
   } catch (error) {
+    if (tray && !tray.isDestroyed()) tray.destroy();
+    tray = null;
     log('no system tray available, closing the window will quit:', error);
     window.on('closed', () => {
       void shutdown(0);

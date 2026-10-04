@@ -83,12 +83,14 @@
           type="text"
           placeholder="https://sharkord.example.com"
           autocomplete="off"
+          aria-label="Server address"
+          aria-describedby="error"
           spellcheck="false"
           autofocus
         />
         <button id="submit" type="submit">Connect</button>
       </form>
-      <div id="error"></div>
+      <div id="error" role="alert"></div>
       <small>Change it later with Ctrl/Cmd+Shift+S. Saved per user.</small>
     </main>
     <script>
@@ -105,6 +107,8 @@
       } else {
         bridge.currentServer().then((url) => {
           if (url) input.value = url;
+        }).catch((failure) => {
+          error.textContent = String(failure);
         });
       }
 
