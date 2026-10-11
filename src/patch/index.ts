@@ -57,7 +57,7 @@ export type PatchEnvironment = {
     }): Promise<boolean>;
     acquireCapture(): Promise<void>;
     releaseCapture(): Promise<void>;
-    onPcm(cb: (chunk: Uint8Array) => void): () => void;
+    onPcm(cb: (chunk: Uint8Array, firstSample?: number) => void): () => void;
     onCaptureEnded?(cb: () => void): () => void;
   };
   /** Measures whether the capture can hear this app; overridable for tests. */
@@ -157,7 +157,8 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
       let timestampUs = 0;
       let pending = 0;
       const writer = generator.writable.getWriter();
-      unsubscribePcm = env.bridge.onPcm((chunk) => {
+      unsubscribePcm = env.bridge.onPcm((chunk, firstSample) => {
+        if (firstSample !== undefined) timestampUs = Math.round(firstSample / PCM_SAMPLE_RATE * 1e6);
         const framed = frameInterleavedF32(carry, chunk, PCM_CHANNELS);
         carry = framed.carry;
         for (const frame of framed.frames) {

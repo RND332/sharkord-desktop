@@ -1,7 +1,19 @@
 import { contextBridge, ipcRenderer, webFrame } from 'electron';
 import { PickerPayload } from '../main/picker';
 
-type PcmHandler = (event: unknown, chunk: Uint8Array, sessionId?: number) => void;
+type PcmCallback = (chunk: Uint8Array, firstSample?: number) => void;
+const pcmListeners = new Set<PcmCallback>();
+
+ipcRenderer.on('pcm', (_event, chunk: Uint8Array, sessionId?: number, sequence?: number, firstSample?: number) => {
+  try {
+    if (session !== null ? sessionId !== session : typeof sessionId === 'number') return;
+    if (pcmListeners.size === 0) return;
+    const bytes = new Uint8Array(chunk);
+    for (const callback of pcmListeners) callback(bytes, firstSample);
+  } finally {
+    if (typeof sessionId === 'number' && typeof sequence === 'number') ipcRenderer.send('pcm:ack', sessionId, sequence);
+  }
+});
 
 let holders = 0;
 let acquiring: Promise<number | null> | null = null;
@@ -87,15 +99,9 @@ const bridge = {
     sessionEnded = false;
     await ipcRenderer.invoke('capture:release', releasing ?? undefined);
   },
-  onPcm: (callback: (chunk: Uint8Array) => void): (() => void) => {
-    const handler: PcmHandler = (_event, chunk, sessionId) => {
-      if (session !== null ? sessionId !== session : typeof sessionId === 'number') return;
-      callback(new Uint8Array(chunk));
-    };
-    ipcRenderer.on('pcm', handler as never);
-    return () => {
-      ipcRenderer.off('pcm', handler as never);
-    };
+  onPcm: (callback: PcmCallback): (() => void) => {
+    pcmListeners.add(callback);
+    return () => { pcmListeners.delete(callback); };
   },
   onCaptureEnded: (callback: () => void): (() => void) => {
     endedListeners.add(callback);

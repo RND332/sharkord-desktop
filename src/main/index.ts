@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { release as osRelease } from 'node:os';
 import { loadConfig } from './config';
+import { PcmDelivery } from './pcm-delivery';
 import { describeEnvironment, getLogsDirectory, initializeLogging, log, readLogTail } from './logger';
 import { removeLegacyRouting } from './legacy';
 import { displayCapturerRequest, pickDisplaySource, registerPickerIpc } from './picker';
@@ -72,8 +73,12 @@ let acquiringWindowsAudio = false;
 let windowsCaptureSerial = 0;
 let activeWindowsSession: number | null = null;
 let captureDocument = 0;
+const pcmDelivery = new PcmDelivery();
+let pcmSessionId: number | null = null;
 
 const stopDocumentCapture = (): void => {
+  pcmDelivery.stop();
+  pcmSessionId = null;
   captureDocument += 1;
   activeWindowsSession = null;
   selectingWindowsAudio = false;
@@ -198,14 +203,21 @@ const installPermissionHandlers = (origin: () => string): void => {
 
 const registerIpc = (): void => {
   ipcMain.handle('patch:source', async () => readFile(join(__dirname, 'patch.js'), 'utf8'));
+  ipcMain.on('pcm:ack', (event, sessionId: unknown, sequence: unknown) => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) return;
+    pcmDelivery.acknowledge(sessionId, sequence);
+  });
   ipcMain.handle('capture:acquire', async (event) => {
     if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame) {
       throw new Error('capture is only available to the main client');
     }
     if (!captureSource) throw new Error('this platform has no capture of its own');
     if (!windowsCapture) {
+      if (pcmSessionId !== null) return pcmSessionId;
+      pcmSessionId = ++windowsCaptureSerial;
+      pcmDelivery.start(pcmSessionId);
       tap.start();
-      return;
+      return pcmSessionId;
     }
     if (acquiringWindowsAudio || activeWindowsSession !== null) throw new Error('another audio share is already active');
     const target = pendingWindowsTarget;
@@ -214,6 +226,8 @@ const registerIpc = (): void => {
     acquiringWindowsAudio = true;
     const sessionId = ++windowsCaptureSerial;
     activeWindowsSession = sessionId;
+    pcmSessionId = sessionId;
+    pcmDelivery.start(sessionId);
     try {
       windowsCapture.start(target);
       await windowsCapture.waitUntilCapturing();
@@ -222,6 +236,8 @@ const registerIpc = (): void => {
     } catch (error) {
       if (activeWindowsSession === sessionId) {
         activeWindowsSession = null;
+        pcmSessionId = null;
+        pcmDelivery.stop();
         windowsCapture.stop();
       }
       throw error;
@@ -236,12 +252,17 @@ const registerIpc = (): void => {
       activeWindowsSession = null;
       pendingWindowsTarget = null;
     }
+    if (sessionId !== pcmSessionId) return;
+    pcmSessionId = null;
+    pcmDelivery.stop();
     captureSource?.stop();
   });
   windowsCapture?.onStopped((error) => {
     log('Windows audio capture stopped:', error.message);
     const sessionId = activeWindowsSession;
     activeWindowsSession = null;
+    pcmSessionId = null;
+    pcmDelivery.stop();
     if (sessionId !== null && mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('capture:ended', sessionId);
     }
@@ -249,7 +270,9 @@ const registerIpc = (): void => {
   captureSource?.onData((chunk: Buffer) => {
     if (windowsCapture && activeWindowsSession === null) return;
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('pcm', chunk, windowsCapture ? activeWindowsSession : undefined);
+      for (const packet of pcmDelivery.push(chunk)) {
+        mainWindow.webContents.send('pcm', packet.chunk, packet.sessionId, packet.sequence, packet.firstSample);
+      }
     }
     if (config.debugPcm) debugChunks.push(chunk);
   });
@@ -314,6 +337,10 @@ const bootstrap = async (): Promise<void> => {
   const preloadPath = join(__dirname, 'preload.js');
   if (!existsSync(preloadPath)) log('WARNING: preload bundle missing at', preloadPath);
 
+  // Each load owns its readiness work; a crashed or replaced document cannot finish it.
+  let clientLoadGeneration = 0;
+  let activeRoute: { kind: 'client'; url: string } | { kind: 'picker'; error?: string } = { kind: 'picker' };
+
   const showWindow = (): void => {
     if (!mainWindow) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -351,7 +378,29 @@ const bootstrap = async (): Promise<void> => {
     window.webContents.on('did-start-navigation', (details) => {
       if (details.isMainFrame && !details.isSameDocument) stopWindowCapture();
     });
-    window.webContents.on('render-process-gone', stopWindowCapture);
+    let recoveryAttempts: number[] = [];
+    window.webContents.on('render-process-gone', (_event, details) => {
+      stopWindowCapture();
+      if (mainWindow === window) clientLoadGeneration += 1;
+      if (shuttingDown || mainWindow !== window || window.isDestroyed() || details.reason === 'clean-exit') return;
+      const now = Date.now();
+      recoveryAttempts = recoveryAttempts.filter((time) => now - time < 60_000);
+      if (recoveryAttempts.length >= 3) {
+        log('renderer recovery paused: three crashes within one minute; reload manually to retry');
+        if (Notification.isSupported()) {
+          new Notification({
+            title: 'Sharkord keeps crashing',
+            body: 'Automatic recovery was paused. Open Sharkord and reload the client to retry.'
+          }).show();
+        }
+        return;
+      }
+      recoveryAttempts.push(now);
+      log('recovering crashed client');
+      // Reload this window instead of destroying it: a client hidden in the tray must stay hidden.
+      void reloadActiveRoute()
+        .catch((error) => log('renderer recovery failed:', error));
+    });
     window.webContents.on('destroyed', stopWindowCapture);
     let mentionedTray = false;
     window.on('close', (event) => {
@@ -374,8 +423,8 @@ const bootstrap = async (): Promise<void> => {
       // A page can destroy its own window; with a tray around, bring the client back.
       if (shuttingDown || !tray || tray.isDestroyed()) return;
       log('window was destroyed, reopening it');
-      const next = createWindow();
-      void (currentServerUrl ? loadClient(currentServerUrl) : next.loadFile(connectPagePath));
+      createWindow();
+      void reloadActiveRoute().catch((error) => log('window reopen failed:', error));
     });
   };
 
@@ -408,6 +457,27 @@ const bootstrap = async (): Promise<void> => {
   const connectPagePath = join(__dirname, 'connect.html');
   const serverConfigPath = join(app.getPath('userData'), 'config.json');
 
+  const loadPicker = async (error?: string): Promise<void> => {
+    const target = mainWindow;
+    if (!target) return;
+    activeRoute = { kind: 'picker', error };
+    const generation = ++clientLoadGeneration;
+    const cancelled = (): boolean => shuttingDown || generation !== clientLoadGeneration ||
+      target.isDestroyed() || target !== mainWindow || target.webContents.isCrashed();
+    allowedOrigin = '';
+    try {
+      await target.loadFile(connectPagePath, error ? { query: { error } } : {});
+    } catch (error) {
+      // Recovery owns the replacement picker; an obsolete startup load must not quit it.
+      if (cancelled()) return;
+      throw error;
+    }
+    if (cancelled()) return;
+  };
+  const reloadActiveRoute = (): Promise<boolean | void> => activeRoute.kind === 'client'
+    ? loadClient(activeRoute.url)
+    : loadPicker(activeRoute.error);
+
   // The window closes to the tray; the app keeps capturing and can be shown again from there.
   try {
     const iconPath = join(__dirname, 'icon.png');
@@ -420,7 +490,7 @@ const bootstrap = async (): Promise<void> => {
           label: 'Change server…',
           click: () => {
             showWindow();
-            void mainWindow?.loadFile(connectPagePath);
+            void loadPicker();
           }
         },
         { type: 'separator' },
@@ -452,7 +522,7 @@ const bootstrap = async (): Promise<void> => {
             label: 'Change server…',
             accelerator: 'CmdOrCtrl+Shift+S',
             click: () => {
-              void mainWindow?.loadFile(connectPagePath);
+              void loadPicker();
             }
           },
           {
@@ -544,65 +614,76 @@ const bootstrap = async (): Promise<void> => {
     currentServerUrl = normalized ?? url;
     const target = mainWindow;
     if (!target) return false;
+    activeRoute = { kind: 'client', url: normalized ?? url };
+    const generation = ++clientLoadGeneration;
+    const cancelled = (): boolean => shuttingDown || generation !== clientLoadGeneration ||
+      target.isDestroyed() || target !== mainWindow || target.webContents.isCrashed();
     try {
       if (!normalized) throw new Error('Enter an address such as https://sharkord.example.com');
       allowedOrigin = new URL(normalized).origin;
       await target.loadURL(normalized);
     } catch (error) {
-      if (target.isDestroyed() || target !== mainWindow || (error as NodeJS.ErrnoException).code === 'ERR_ABORTED') {
+      if (cancelled() || (error as NodeJS.ErrnoException).code === 'ERR_ABORTED') {
         return false;
       }
       log('client connection failed:', error);
-      allowedOrigin = '';
-      await target.loadFile(connectPagePath, {
-        query: { error: error instanceof Error ? error.message : String(error) }
-      });
+      await loadPicker(error instanceof Error ? error.message : String(error));
       return false;
     }
+    if (cancelled()) return false;
     log('client loaded:', normalized);
 
-    // The patch is injected asynchronously from the preload; give it a moment before judging.
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      const readiness = (await target.webContents.executeJavaScript(
-        `({
-          bridge: typeof window.sharkordDesktop,
-          platform: window.sharkordDesktop?.platform ?? 'missing',
-          capture: window.sharkordDesktop?.captureSource ?? 'missing',
-          badge: document.querySelector('[data-sharkord-desktop-version]')?.textContent ?? 'missing',
-          patched: navigator.mediaDevices?.getDisplayMedia?.__sharkordDesktop === true,
-          source: String(navigator.mediaDevices?.getDisplayMedia ?? '').slice(0, 120),
-          generator: typeof MediaStreamTrackGenerator === 'function'
-        })`,
-        true
-      )) as {
-        bridge: string;
-        platform: string;
-        capture: string;
-        badge: string;
-        patched: boolean;
-        source: string;
-        generator: boolean;
-      };
-      if (readiness.bridge === 'object' && readiness.patched) {
-        log('screen-share audio ready:', JSON.stringify(readiness));
-        if (readiness.capture !== captureKind) {
-          log(`WARNING: expected the "${captureKind}" capture path, got "${readiness.capture}"`);
-          log('injected getDisplayMedia source:', readiness.source);
-          if (Notification.isSupported()) {
-            new Notification({
-              title: 'Screen-share audio is not active',
-              body: 'The capture path did not load. Screen shares will be silent — check Server → Show diagnostics…'
-            }).show();
+    try {
+      // The patch is injected asynchronously from the preload; give it a moment before judging.
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        if (cancelled()) return false;
+        const readiness = (await target.webContents.executeJavaScript(
+          `({
+            bridge: typeof window.sharkordDesktop,
+            platform: window.sharkordDesktop?.platform ?? 'missing',
+            capture: window.sharkordDesktop?.captureSource ?? 'missing',
+            badge: document.querySelector('[data-sharkord-desktop-version]')?.textContent ?? 'missing',
+            patched: navigator.mediaDevices?.getDisplayMedia?.__sharkordDesktop === true,
+            source: String(navigator.mediaDevices?.getDisplayMedia ?? '').slice(0, 120),
+            generator: typeof MediaStreamTrackGenerator === 'function'
+          })`,
+          true
+        )) as {
+          bridge: string;
+          platform: string;
+          capture: string;
+          badge: string;
+          patched: boolean;
+          source: string;
+          generator: boolean;
+        };
+        if (cancelled()) return false;
+        if (readiness.bridge === 'object' && readiness.patched) {
+          log('screen-share audio ready:', JSON.stringify(readiness));
+          if (readiness.capture !== captureKind) {
+            log(`WARNING: expected the "${captureKind}" capture path, got "${readiness.capture}"`);
+            log('injected getDisplayMedia source:', readiness.source);
+            if (Notification.isSupported()) {
+              new Notification({
+                title: 'Screen-share audio is not active',
+                body: 'The capture path did not load. Screen shares will be silent — check Server → Show diagnostics…'
+              }).show();
+            }
           }
+          break;
         }
-        break;
+        if (attempt === 9) {
+          log('WARNING: screen-share audio patch is not installed:', JSON.stringify(readiness));
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
       }
-      if (attempt === 9) {
-        log('WARNING: screen-share audio patch is not installed:', JSON.stringify(readiness));
-      }
-      await new Promise((resolve) => setTimeout(resolve, 200));
+    } catch (error) {
+      // Renderer termination may reject an in-flight executeJavaScript. Recovery owns
+      // the replacement document; do not let the obsolete startup load quit the app.
+      if (cancelled()) return false;
+      throw error;
     }
-    return true;
+    return !cancelled();
   };
 
   ipcMain.handle('app:info', () => ({ version: app.getVersion(), platform: process.platform }));
@@ -689,7 +770,7 @@ const bootstrap = async (): Promise<void> => {
   if (startUrl) {
     await loadClient(startUrl);
   } else {
-    await window.loadFile(connectPagePath);
+    await loadPicker();
     log('no server chosen yet, showing the picker');
   }
 };

@@ -7,6 +7,7 @@ const electron = vi.hoisted(() => {
   return {
     handlers,
     invoke: vi.fn(),
+    send: vi.fn(),
     on: vi.fn((event: string, handler: IpcHandler) => {
       const listeners = handlers.get(event) ?? new Set<IpcHandler>();
       listeners.add(handler);
@@ -25,14 +26,14 @@ const electron = vi.hoisted(() => {
 
 vi.mock('electron', () => ({
   contextBridge: { exposeInMainWorld: electron.expose },
-  ipcRenderer: { invoke: electron.invoke, on: electron.on, off: electron.off },
+  ipcRenderer: { invoke: electron.invoke, send: electron.send, on: electron.on, off: electron.off },
   webFrame: { executeJavaScript: electron.executeJavaScript }
 }));
 
 type Bridge = {
   acquireCapture(): Promise<void>;
   releaseCapture(): Promise<void>;
-  onPcm(callback: (chunk: Uint8Array) => void): () => void;
+  onPcm(callback: (chunk: Uint8Array, firstSample?: number) => void): () => void;
   onCaptureEnded(callback: () => void): () => void;
 };
 
@@ -53,6 +54,7 @@ let restoreLog: (() => void) | null = null;
 beforeEach(() => {
   electron.handlers.clear();
   electron.invoke.mockReset();
+  electron.send.mockClear();
   electron.invoke.mockResolvedValue(undefined);
   const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
   restoreLog = () => spy.mockRestore();
@@ -64,6 +66,18 @@ afterEach(() => {
 });
 
 describe('preload bridge: capture sessions', () => {
+  it('acknowledges processed PCM, even when there are no listeners, and forwards sample positions', async () => {
+    const bridge = await loadBridge();
+    electron.invoke.mockResolvedValueOnce(7);
+    await bridge.acquireCapture();
+    electron.emit('pcm', new Uint8Array([1]), 7, 1, 960);
+    expect(electron.send).toHaveBeenCalledWith('pcm:ack', 7, 1);
+    const callback = vi.fn();
+    bridge.onPcm(callback);
+    electron.emit('pcm', new Uint8Array([2]), 7, 2, 1920);
+    expect(callback).toHaveBeenCalledWith(new Uint8Array([2]), 1920);
+    expect(electron.send).toHaveBeenCalledWith('pcm:ack', 7, 2);
+  });
   it('delivers PCM only for the session the page holds', async () => {
     const bridge = await loadBridge();
     electron.invoke.mockResolvedValueOnce(7);

@@ -89,7 +89,7 @@ type SetupOptions = {
 
 const setup = (options: SetupOptions = {}) => {
   const writes: WriteRecord[] = [];
-  const pcmCallbacks: Array<(chunk: Uint8Array) => void> = [];
+  const pcmCallbacks: Array<(chunk: Uint8Array, firstSample?: number) => void> = [];
   const captureEndedCallbacks: Array<() => void> = [];
   let closedData = 0;
   const videoTrack = makeTrack('video');
@@ -184,7 +184,7 @@ const setup = (options: SetupOptions = {}) => {
     reportCaptureMode,
     probe,
     generatedTracks,
-    pushPcm: (chunk: Uint8Array) => pcmCallbacks.forEach((cb) => cb(chunk)),
+    pushPcm: (chunk: Uint8Array, firstSample?: number) => pcmCallbacks.forEach((cb) => cb(chunk, firstSample)),
     tick: () => intervalCallback?.(),
     pcmHandlerCount: () => pcmCallbacks.length,
     emitCaptureEnded: () => captureEndedCallbacks.slice().forEach((cb) => cb()),
@@ -413,6 +413,15 @@ describe('display-media patch: Windows audio ownership', () => {
 
     const next = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
     expect(next.getAudioTracks()).toHaveLength(1);
+  });
+
+  it('keeps the absolute audio clock across native IPC drops', async () => {
+    const env = setup();
+    await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    env.pushPcm(interleaved(480, 0), 0);
+    await flush();
+    env.pushPcm(interleaved(480, 0), 48000);
+    expect(env.writes.map((write) => write.timestamp)).toEqual([0, 1000000]);
   });
 
   it('closes each AudioData once the writer took it', async () => {
