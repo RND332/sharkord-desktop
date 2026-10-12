@@ -21,10 +21,11 @@ import { loadConfig } from './config';
 import { PcmDelivery } from './pcm-delivery';
 import { describeEnvironment, getLogsDirectory, initializeLogging, log, readLogTail } from './logger';
 import { removeLegacyRouting } from './legacy';
+import { resolveLinuxAudioTarget } from './linux-audio';
 import { displayCapturerRequest, pickDisplaySource, registerPickerIpc } from './picker';
 import { isServerOrigin, normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
 import { runSelftest } from './selftest';
-import { TapCapture } from './tap';
+import { TapCapture, type TapTarget } from './tap';
 import { WindowsCapture, helperExists, windowsTargetForSource, type WindowsCaptureTarget } from './windows-capture';
 import { checkForUpdatesNow, installPendingUpdateSilently, setupAutoUpdates } from './updater';
 import { writeWav } from './wav';
@@ -68,6 +69,8 @@ let allowedOrigin = '';
 let currentServerUrl: string | null = null;
 const debugChunks: Buffer[] = [];
 let pendingWindowsTarget: WindowsCaptureTarget | null = null;
+let pendingLinuxTarget: TapTarget | null = null;
+let selectingLinuxAudio = false;
 let selectingWindowsAudio = false;
 let acquiringWindowsAudio = false;
 let windowsCaptureSerial = 0;
@@ -85,6 +88,8 @@ const stopDocumentCapture = (): void => {
   acquiringWindowsAudio = false;
   pendingWindowsTarget = null;
   captureSource?.stop();
+  pendingLinuxTarget = null;
+  selectingLinuxAudio = false;
 };
 
 const installPermissionHandlers = (origin: () => string): void => {
@@ -114,8 +119,18 @@ const installPermissionHandlers = (origin: () => string): void => {
       return;
     }
     const windowsAudio = process.platform === 'win32' && request.audioRequested;
+    const linuxAudio = process.platform === 'linux' && request.audioRequested && captureSource !== null;
     const documentVersion = captureDocument;
     let completed = false;
+    if (linuxAudio && (selectingLinuxAudio || pendingLinuxTarget !== null || pcmSessionId !== null)) {
+      log('another Linux audio share is already active or being selected');
+      callback(null!);
+      return;
+    }
+    if (linuxAudio) {
+      selectingLinuxAudio = true;
+      pendingLinuxTarget = null;
+    }
     if (windowsAudio && (selectingWindowsAudio || acquiringWindowsAudio || activeWindowsSession !== null)) {
       log('another Windows audio share is already active');
       // Electron's native API accepts null for denial; its Streams type omits that case.
@@ -126,7 +141,8 @@ const installPermissionHandlers = (origin: () => string): void => {
       selectingWindowsAudio = true;
       pendingWindowsTarget = null;
     }
-    const wayland = process.platform === 'linux' && process.env.XDG_SESSION_TYPE === 'wayland';
+    const wayland = process.platform === 'linux' &&
+      (process.env.XDG_SESSION_TYPE === 'wayland' || Boolean(process.env.WAYLAND_DISPLAY));
     const wantsSystemPicker = process.env.SHARKORD_PICKER === 'system' || (wayland && process.env.SHARKORD_PICKER !== 'inapp');
 
     try {
@@ -173,17 +189,42 @@ const installPermissionHandlers = (origin: () => string): void => {
         return;
       }
       const haveOwnCapture = captureSource !== null;
+      if (process.platform === 'linux' && request.audioRequested && captureSource) {
+        const target = await resolveLinuxAudioTarget(picked, {
+          wayland,
+          choose: async (windows) => {
+            const result = await dialog.showMessageBox(mainWindow!, {
+              type: 'question',
+              title: 'Screen-share audio',
+              message: 'Which application did you select in the system picker?',
+              detail: 'Wayland does not identify the selected window to Electron. Choose its application below, or share video only. Application audio includes ALL windows and tabs of that application (including Chrome). Choose entire-screen audio ONLY if you selected an entire screen: it includes all other applications.',
+              buttons: ['Video only', 'I selected an entire screen — share all other apps',
+                ...windows.map((window) => `${window.title || window.appClass} (${window.appClass}, PID ${window.processId})`)],
+              defaultId: 0,
+              cancelId: 0,
+              noLink: true
+            });
+            return result.response;
+          }
+        });
+        if (documentVersion !== captureDocument || request.frame !== mainWindow?.webContents.mainFrame) {
+          callback(null!);
+          return;
+        }
+        pendingLinuxTarget = target;
+      }
       if (windowsAudio && windowsCapture) pendingWindowsTarget = windowsTargetForSource(picked.id);
       const wantsBrowserAudio = request.audioRequested && process.platform === 'darwin';
       log(
         'screen share source:',
         JSON.stringify({
           name: picked.name,
+          linuxAudioTarget: process.platform === 'linux' ? pendingLinuxTarget : undefined,
           of: sources.length,
           picker: wantsSystemPicker ? 'system' : 'in-app',
           audio: request.audioRequested
             ? haveOwnCapture
-              ? 'isolated native capture'
+              ? process.platform === 'linux' && !pendingLinuxTarget ? 'unavailable (video only)' : 'native capture'
               : wantsBrowserAudio ? 'browser loopback' : 'unavailable'
             : 'not requested',
           helper: windowsCapture ? 'win-audio-capture.exe' : undefined,
@@ -197,6 +238,7 @@ const installPermissionHandlers = (origin: () => string): void => {
       if (!completed) callback(null!);
     } finally {
       if (windowsAudio && documentVersion === captureDocument) selectingWindowsAudio = false;
+      if (linuxAudio && documentVersion === captureDocument) selectingLinuxAudio = false;
     }
   });
 };
@@ -213,10 +255,13 @@ const registerIpc = (): void => {
     }
     if (!captureSource) throw new Error('this platform has no capture of its own');
     if (!windowsCapture) {
-      if (pcmSessionId !== null) return pcmSessionId;
+      if (pcmSessionId !== null) throw new Error('another audio share is already active');
+      const target = pendingLinuxTarget;
+      pendingLinuxTarget = null;
+      if (!target) throw new Error('no Linux audio source was selected');
       pcmSessionId = ++windowsCaptureSerial;
       pcmDelivery.start(pcmSessionId);
-      tap.start();
+      tap.start(target);
       return pcmSessionId;
     }
     if (acquiringWindowsAudio || activeWindowsSession !== null) throw new Error('another audio share is already active');
@@ -690,6 +735,9 @@ const bootstrap = async (): Promise<void> => {
   ipcMain.handle('capture:mode', (_event, info: unknown) => {
     const details = (info ?? {}) as { mode?: string; echoTest?: string };
     log('page capture mode:', JSON.stringify(details));
+    if (process.platform === 'linux' && details.mode === 'system-audio-unavailable' &&
+      _event.sender === mainWindow?.webContents && _event.senderFrame === _event.sender.mainFrame &&
+      pcmSessionId === null && !selectingLinuxAudio) pendingLinuxTarget = null;
 
     // A new share always gets its own verdict, so an old warning does not silence a new one.
     if (details.mode === 'captured-pcm') {
@@ -717,7 +765,7 @@ const bootstrap = async (): Promise<void> => {
       warnedAboutEcho = true;
       log(
         'WARNING: isolated audio capture is unavailable; this share stays video-only. ' +
-          'No system-loopback fallback is used on Windows. Check Server → Show diagnostics… for the capture log.'
+          'No system-loopback fallback is used on Linux or Windows. Check Server → Show diagnostics… for the capture log.'
       );
       if (Notification.isSupported()) {
         new Notification({

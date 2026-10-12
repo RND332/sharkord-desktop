@@ -4,8 +4,8 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Electron client for a self-hosted [Sharkord](https://github.com/Sharkord/sharkord) instance whose
-screen shares carry **the whole PC's audio except Sharkord itself** — viewers hear your games, browser
-and music, never their own voices.
+screen shares carry **the whole PC's audio except Sharkord itself**, while Linux and Windows
+application shares carry only that application's process tree. Viewers never hear their own voices.
 
 > [!NOTE]
 > Entirely vibecoded: this codebase was written end-to-end by an AI coding agent (opencode-go /
@@ -61,8 +61,9 @@ this app's own playback is never linked ──► viewers never hear themselves
 
 1. When a screen share starts, the app runs `pw-record` with `node.autoconnect=false` — no device
    appears anywhere, only a recording stream while you share.
-2. Every other application's output ports are linked into that node (`pw-link`), mono fanned out to
-   both sides; links are re-checked once a second so apps that start later are picked up.
+2. For an entire-screen share, every other application's output ports are linked into that node
+   (`pw-link`), mono fanned out to both sides. For an application share, only the selected process
+   and its descendants are linked. Links are re-checked once a second for newly opened streams.
 3. The client's own playback is excluded by process tree, so the voice channel is audible to you and
    absent from the capture.
 4. The captured PCM is injected as a real audio track into a main-world patch of `getDisplayMedia`,
@@ -74,6 +75,34 @@ the process owning the chosen HWND. Process loopback spans playback endpoints, r
 only the default device. A `READY` acknowledgement confirms startup even when the selected app is
 silent. Missing or failed native capture leaves the share video-only: Windows never falls back to
 Chromium's whole-system loopback or uses a short tone probe as a substitute for isolation.
+
+### Linux window audio and Wayland
+
+On X11, a selected window's `_NET_WM_PID` identifies its application; `xprop` must be available.
+An unresolved window stays video-only, never falling back to all-system audio.
+
+Wayland's portal does **not** expose the selected window or even distinguish a window from a
+screen in Electron's source metadata. After the system video picker, Sharkord asks which
+application to capture for audio. On Hyprland, choose the matching window from the `hyprctl`
+list. Other Wayland compositors currently offer video-only application sharing. The default is
+**Video only**; full-PC audio requires explicitly confirming **I selected an entire screen**.
+Never choose that option for a window share. This additional confirmation avoids treating an
+opaque portal `screen:` ID as permission to capture every application's sound.
+
+Isolation is **application/process-tree level**, not individual Chrome-window or tab level.
+Chrome's windows and tabs share an audio-service process; audio from other Chrome windows/tabs
+can therefore still be included. Use a separate browser instance with a distinct `--user-data-dir`
+for stricter separation (a different Chrome window or profile alone is not sufficient).
+Audio from unrelated applications is excluded. Linux does not fall back to browser system audio
+when native capture is unavailable. Only one native audio share may be active at a time.
+
+Run the native fixture-only PipeWire check without changing devices or playing tones into speakers:
+
+```bash
+TMPDIR="${TMPDIR:-$HOME/.cache}" bun test/pipewire-isolation-smoke.ts
+# Deliberately leaky control: must fail because the unrelated 880 Hz tone is included.
+TMPDIR="${TMPDIR:-$HOME/.cache}" bun test/pipewire-isolation-smoke.ts --baseline
+```
 
 Closing the window keeps the app in the tray (capture and voice stay connected) and says so once.
 If the tray is unavailable or fails during setup, closing quits instead of hiding an unreachable window.

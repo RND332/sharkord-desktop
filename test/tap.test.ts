@@ -89,10 +89,18 @@ const makeWorld = (ownPids: number[] = [], dump: string = PW_DUMP) => {
     ownsProcess: (pid) => pid !== null && ownPids.includes(pid),
     log: () => {}
   });
-  return { links, spawns, tap, emitSpawnError: (error: Error) => errors.forEach((cb) => cb(error)) };
+  return { links, spawns, tap, setDump: (next: string) => { dump = next; }, emitSpawnError: (error: Error) => errors.forEach((cb) => cb(error)) };
 };
 
 describe('parseGraph', () => {
+  it('resolves native PipeWire stream PIDs from their client when absent on the node', () => {
+    const objects = JSON.parse(PW_DUMP);
+    const props = objects.find((entry: { id: number }) => entry.id === 221).info.props;
+    delete props['application.process.id'];
+    props['client.id'] = 900;
+    objects.push({ id: 900, type: 'PipeWire:Interface:Client', info: { props: { 'application.process.id': '10845' } } });
+    expect(parseGraph(JSON.stringify(objects), 'sharkord_capture').streams[0]!.processId).toBe(10845);
+  });
   it('keeps every playback stream by id, even when names collide', () => {
     const graph = parseGraph(PW_DUMP, 'sharkord_capture');
 
@@ -197,6 +205,39 @@ describe('TapCapture', () => {
       { from: '222:output_MONO', to: '141:input_FR' }
     ]);
     expect(tap.linkedCount).toBe(4);
+    tap.stop();
+  });
+
+  it('links only the selected application, never unrelated or unidentified playback', async () => {
+    const objects = JSON.parse(PW_DUMP);
+    objects.find((entry: { id: number }) => entry.id === 222).info.props['application.process.id'] = 30001;
+    const { links, tap } = makeWorld([], JSON.stringify(objects));
+    tap.start({ kind: 'application', processId: 27893 });
+    await tap.reconcile();
+    expect(links.map((link) => link.from)).toEqual(['221:output_FL', '221:output_FR']);
+    tap.stop();
+  });
+
+  it('includes selected application audio-helper descendants, not unidentified PIDs', async () => {
+    const objects = JSON.parse(PW_DUMP);
+    objects.find((entry: { id: number }) => entry.id === 221).info.props['application.process.id'] = process.pid;
+    objects.find((entry: { id: number }) => entry.id === 222).info.props['application.process.id'] = null;
+    const { links, tap } = makeWorld([], JSON.stringify(objects));
+    tap.start({ kind: 'application', processId: process.ppid });
+    await tap.reconcile();
+    expect(links.map((link) => link.from)).toEqual(['221:output_FL', '221:output_FR']);
+    tap.stop();
+  });
+
+  it('disconnects a linked stream that no longer belongs to the selected application', async () => {
+    const { links, tap, setDump } = makeWorld();
+    tap.start({ kind: 'application', processId: 27893 });
+    await tap.reconcile();
+    setDump(PW_DUMP.replaceAll('27893', '30001'));
+    await tap.reconcile();
+    expect(links.filter((link) => link.from === '-d')).toHaveLength(4);
+    expect(tap.linkedCount).toBe(0);
+    expect(tap.tappedProcessIds).toEqual([]);
     tap.stop();
   });
 

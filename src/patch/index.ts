@@ -75,12 +75,13 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
   const originalGetDisplayMedia = mediaDevices.getDisplayMedia.bind(mediaDevices);
   const probe = env.probeOwnAudio ?? ((track: MediaStreamTrack) => probeOwnAudio(track, { log }));
   const windows = env.bridge.platform === 'win32';
+  const isolatedNative = windows || env.bridge.platform === 'linux';
   let windowsShareOpen = false;
   let windowsShareRelease: Promise<void> = Promise.resolve();
 
   const releaseNativeCapture = (): Promise<void> => {
     const released = env.bridge.releaseCapture().catch(() => {});
-    if (!windows) return released;
+    if (!isolatedNative) return released;
     windowsShareRelease = released.then(() => {
       windowsShareOpen = false;
     });
@@ -238,9 +239,9 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
       await configureDisplayVideo(stream);
       return stream;
     }
-    if (windows) {
+    if (isolatedNative) {
       await windowsShareRelease;
-      if (windowsShareOpen) throw new Error('a Windows audio share is already open');
+      if (windowsShareOpen) throw new Error('an isolated audio share is already open');
       windowsShareOpen = true;
     }
 
@@ -253,7 +254,7 @@ export const installGetDisplayMediaPatch = (env: PatchEnvironment): void => {
       throw error;
     }
 
-    if (windows) {
+    if (isolatedNative) {
       const withOurs = await withCapturedAudio(stream);
       if (withOurs) return withOurs;
       for (const track of stream.getAudioTracks()) track.stop();

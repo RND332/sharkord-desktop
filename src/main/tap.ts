@@ -24,7 +24,7 @@ export type Graph = { streams: GraphStream[]; tapNodeId: number | null };
 const defaultSpawner: Spawner = (bin, args) =>
   spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] }) as unknown as ChildProcessLike;
 
-const defaultRunner: Runner = (bin, args) => {
+export const defaultRunner: Runner = (bin, args) => {
   const { promise, resolve, reject } = Promise.withResolvers<string>();
   execFile(bin, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => {
     if (error) reject(error);
@@ -55,6 +55,8 @@ export const parseGraph = (json: string, tapName: string): Graph => {
 
   const streams: GraphStream[] = [];
   const portsByNode = new Map<number, string[]>();
+  const clientPids = new Map<number, number>();
+  const streamClients = new Map<number, number>();
   let tapNodeId: number | null = null;
 
   for (const entry of objects) {
@@ -66,9 +68,16 @@ export const parseGraph = (json: string, tapName: string): Graph => {
     const props = record.info?.props ?? {};
     const id = num(record.id);
 
+    if (record.type === 'PipeWire:Interface:Client' && id !== null) {
+      const pid = num(props['application.process.id']);
+      if (pid !== null) clientPids.set(id, pid);
+    }
+
     if (record.type === 'PipeWire:Interface:Node' && id !== null) {
       const mediaClass = props['media.class'];
       if (mediaClass === 'Stream/Output/Audio') {
+        const clientId = num(props['client.id']);
+        if (clientId !== null) streamClients.set(id, clientId);
         streams.push({
           nodeId: id,
           appName: String(props['application.name'] ?? props['node.name'] ?? ''),
@@ -95,6 +104,7 @@ export const parseGraph = (json: string, tapName: string): Graph => {
 
   for (const stream of streams) {
     stream.ports = portsByNode.get(stream.nodeId) ?? [];
+    if (stream.processId === null) stream.processId = clientPids.get(streamClients.get(stream.nodeId) ?? -1) ?? null;
   }
 
   return { streams, tapNodeId };
@@ -150,13 +160,16 @@ export type TapOptions = {
 };
 
 export type TapState = { running: boolean; linked: number; restarts: number };
+export type TapTarget = { kind: 'screen' } | { kind: 'application'; processId: number };
 
 /**
- * Records the audio of every *other* application by linking their output ports into a plain
+ * Records the selected application's process tree (or every *other* application for a screen)
+ * by linking their output ports into a plain
  * `pw-record` node. Nothing in the session's routing is touched: no sink is created, no default
  * device changes and no stream is moved — the client's own playback is simply never linked.
  */
 export class TapCapture {
+  private target: TapTarget = { kind: 'screen' };
   private child: ChildProcessLike | null = null;
   private stopping = true;
   private restarts = 0;
@@ -203,8 +216,9 @@ export class TapCapture {
     return [...this.tappedPids];
   }
 
-  start(): void {
+  start(target: TapTarget = { kind: 'screen' }): void {
     if (this.child || this.timer) return;
+    this.target = target;
     this.stopping = false;
     this.reconciling = null;
     this.reconcileGeneration += 1;
@@ -280,8 +294,30 @@ export class TapCapture {
 
     const alive = new Set<number>();
     for (const stream of graph.streams) {
+      const allowed = !this.ownsProcess(stream.processId) &&
+        (this.target.kind === 'screen' || isOwnProcess(stream.processId, this.target.processId));
+      if (!allowed) {
+        // Ownership can change while a node survives (e.g. the selected app
+        // exits and its audio helper is reparented). Drop only our tap links.
+        for (const key of [...this.linked]) {
+          if (!key.startsWith(`${stream.nodeId}:`)) continue;
+          const [from, to] = key.split('->');
+          if (!current()) return;
+          try {
+            await this.runner('pw-link', ['-d', from!, `${graph.tapNodeId}:${to}`]);
+          } catch (error) {
+            if (current()) {
+              this.log('could not remove ineligible audio; stopping capture:', error);
+              this.stop();
+            }
+            return;
+          }
+          if (!current()) return;
+          this.linked.delete(key);
+        }
+        continue;
+      }
       alive.add(stream.nodeId);
-      if (this.ownsProcess(stream.processId)) continue;
 
       for (const port of stream.ports) {
         for (const target of targetsFor(port)) {

@@ -528,6 +528,21 @@ describe('display-media patch: no capture of our own', () => {
 });
 
 describe('display-media patch fallbacks', () => {
+  it('refuses a second Linux audio share while the selected application is being captured', async () => {
+    const test = setup({ platform: 'linux', captureSource: 'pipewire' });
+    await test.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    await expect(test.mediaDevices.getDisplayMedia({ video: true, audio: true })).rejects.toThrow('already');
+    expect(test.getDisplayMedia).toHaveBeenCalledTimes(1);
+    test.generatedTracks[0]!.stop();
+  });
+  it('never falls back to system audio when Linux selected-app capture is unavailable', async () => {
+    const test = setup({ platform: 'linux', captureSource: 'pipewire', probe: async () => false });
+    test.acquireCapture.mockRejectedValueOnce(new Error('no selected source'));
+    const stream = await test.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    expect(stream.getAudioTracks()).toHaveLength(0);
+    expect(test.audioTrack.stopped).toBe(true);
+    expect(test.probe).not.toHaveBeenCalled();
+  });
   it('tries the capture even when the bridge never said it has one', async () => {
     const env = setup({ captureSource: 'unknown' });
     const stream = (await env.mediaDevices.getDisplayMedia({ video: true, audio: true })) as unknown as FakeMediaStream;
@@ -536,8 +551,8 @@ describe('display-media patch fallbacks', () => {
     expect(stream.getAudioTracks()).toHaveLength(1);
   });
 
-  it('falls back to the probe when the capture cannot start', async () => {
-    const env = setup({ platform: 'linux', captureSource: 'pipewire', probe: async () => false });
+  it('keeps the browser-audio probe fallback on macOS', async () => {
+    const env = setup({ platform: 'darwin', captureSource: 'none', probe: async () => false });
     env.acquireCapture.mockRejectedValueOnce(new Error('helper is missing'));
 
     const stream = await env.mediaDevices.getDisplayMedia({ video: true, audio: true });
