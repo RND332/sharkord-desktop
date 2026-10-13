@@ -19,14 +19,20 @@ export type GraphStream = {
   ports: string[];
 };
 
-export type Graph = { streams: GraphStream[]; tapNodeId: number | null };
+export type GraphVideoCapture = {
+  nodeId: number;
+  processId: number | null;
+  targetSerials: string[];
+};
+
+export type Graph = { streams: GraphStream[]; tapNodeId: number | null; videoCaptures: GraphVideoCapture[] };
 
 const defaultSpawner: Spawner = (bin, args) =>
   spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] }) as unknown as ChildProcessLike;
 
 export const defaultRunner: Runner = (bin, args) => {
   const { promise, resolve, reject } = Promise.withResolvers<string>();
-  execFile(bin, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => {
+  execFile(bin, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 3000, killSignal: 'SIGTERM' }, (error, stdout) => {
     if (error) reject(error);
     else resolve(stdout);
   });
@@ -36,27 +42,42 @@ export const defaultRunner: Runner = (bin, args) => {
 type Props = Record<string, unknown>;
 
 const num = (value: unknown): number | null => {
-  const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : NaN;
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  const parsed = typeof value === 'number' ? value : typeof value === 'string' && /^[1-9][0-9]*$/.test(value) ? Number(value) : NaN;
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+};
+
+const PORTAL_GENERATION_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const safeSerial = (value: unknown): string | null => {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return String(value);
+  if (typeof value === 'string' && /^[1-9][0-9]{0,19}$/.test(value)) return value;
+  return null;
 };
 
 /**
- * Reads the pieces of `pw-dump` we care about: every audio playback stream with its node id (names
- * repeat — one Chromium process can have a dozen identically named streams), and the tap node.
+ * Reads audio output, capture video, and the tap from `pw-dump`. PipeWire global node IDs are
+ * transient; portal serials are resolved from the referenced source node's `object.serial`.
  */
-export const parseGraph = (json: string, tapName: string): Graph => {
+export const parseGraph = (json: string, tapName: string, strict = false): Graph => {
   let objects: unknown;
   try {
     objects = JSON.parse(json);
   } catch {
-    return { streams: [], tapNodeId: null };
+    if (strict) throw new Error('PipeWire graph is not valid JSON');
+    return { streams: [], tapNodeId: null, videoCaptures: [] };
   }
-  if (!Array.isArray(objects)) return { streams: [], tapNodeId: null };
+  if (!Array.isArray(objects)) {
+    if (strict) throw new Error('PipeWire graph is not an object array');
+    return { streams: [], tapNodeId: null, videoCaptures: [] };
+  }
 
   const streams: GraphStream[] = [];
+  const rawVideoCaptures: Array<{ nodeId: number; processId: number | null; clientId: number | null; refs: unknown[] }> = [];
   const portsByNode = new Map<number, string[]>();
   const clientPids = new Map<number, number>();
+  const audioClientPids = new Map<number, number>();
   const streamClients = new Map<number, number>();
+  const videoNodeSerials = new Map<number, string>();
   let tapNodeId: number | null = null;
 
   for (const entry of objects) {
@@ -71,17 +92,38 @@ export const parseGraph = (json: string, tapName: string): Graph => {
     if (record.type === 'PipeWire:Interface:Client' && id !== null) {
       const pid = num(props['application.process.id']);
       if (pid !== null) clientPids.set(id, pid);
+      // Audio consent uses the protocol's read-only peer PID, never a node's
+      // self-reported application PID. A proxy's differing application claim
+      // does not authenticate its underlying client, so omit that audio.
+      const peerPid = num(props['pipewire.sec.pid']);
+      if (peerPid !== null && (props['application.process.id'] === undefined || pid === peerPid)) {
+        audioClientPids.set(id, peerPid);
+      }
     }
 
     if (record.type === 'PipeWire:Interface:Node' && id !== null) {
       const mediaClass = props['media.class'];
+      if (mediaClass === 'Video/Source') {
+        const serial = safeSerial(props['object.serial']);
+        if (serial) videoNodeSerials.set(id, serial);
+      }
+      if (mediaClass === 'Stream/Input/Video') {
+        const clientId = num(props['client.id']);
+        rawVideoCaptures.push({
+          nodeId: id,
+          processId: num(props['application.process.id']),
+          clientId,
+          refs: [props['node.target'], props['node.driver-id']].filter((value) => value !== undefined && value !== null)
+        });
+        continue;
+      }
       if (mediaClass === 'Stream/Output/Audio') {
         const clientId = num(props['client.id']);
         if (clientId !== null) streamClients.set(id, clientId);
         streams.push({
           nodeId: id,
           appName: String(props['application.name'] ?? props['node.name'] ?? ''),
-          processId: num(props['application.process.id']),
+          processId: null,
           ports: []
         });
         continue;
@@ -102,12 +144,33 @@ export const parseGraph = (json: string, tapName: string): Graph => {
     }
   }
 
+  const videoSerialNodes = new Map<string, number[]>();
+  for (const [nodeId, serial] of videoNodeSerials) {
+    videoSerialNodes.set(serial, [...(videoSerialNodes.get(serial) ?? []), nodeId]);
+  }
+  const resolveRef = (value: unknown): string | null => {
+    const ref = safeSerial(value);
+    if (!ref) return null;
+    const serialNodes = videoSerialNodes.get(ref) ?? [];
+    const nodeSerial = videoNodeSerials.get(Number(ref));
+    const matches = new Set([...serialNodes, ...(nodeSerial ? [Number(ref)] : [])]
+      .map((nodeId) => videoNodeSerials.get(nodeId))
+      .filter((serial): serial is string => serial !== undefined));
+    return matches.size === 1 ? [...matches][0]! : null;
+  };
+
   for (const stream of streams) {
     stream.ports = portsByNode.get(stream.nodeId) ?? [];
-    if (stream.processId === null) stream.processId = clientPids.get(streamClients.get(stream.nodeId) ?? -1) ?? null;
+    stream.processId = audioClientPids.get(streamClients.get(stream.nodeId) ?? -1) ?? null;
   }
 
-  return { streams, tapNodeId };
+  const videoCaptures = rawVideoCaptures.map((capture) => {
+    const processId = capture.processId ?? clientPids.get(capture.clientId ?? -1) ?? null;
+    const targetSerials = [...new Set(capture.refs.map(resolveRef).filter((serial): serial is string => serial !== null))];
+    return { nodeId: capture.nodeId, processId, targetSerials };
+  });
+
+  return { streams, tapNodeId, videoCaptures };
 };
 
 /** Which tap inputs a stream's output port feeds. Mono fans out to both sides. */
@@ -124,15 +187,24 @@ export const targetsFor = (port: string): string[] => {
   }
 };
 
-const parentPid = (pid: number): number | null => {
+export const readProcessStat = (pid: number, procRoot = '/proc'): ProcessStat | null => {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return null;
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    const parsed = Number(fields[1]);
-    return Number.isInteger(parsed) ? parsed : null;
+    const stat = readFileSync(`${procRoot}/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+    const parent = Number(fields[1]);
+    const startTime = fields[19];
+    if (!Number.isSafeInteger(parent) || parent < 0 || !startTime || !/^\d+$/.test(startTime)) return null;
+    return { parentPid: parent, startTime };
   } catch {
     return null;
   }
+};
+
+export type ProcessStat = { parentPid: number; startTime: string };
+export const readProcessIdentity = (pid: number, procRoot = '/proc'): { pid: number; startTime: string } | null => {
+  const stat = readProcessStat(pid, procRoot);
+  return stat ? { pid, startTime: stat.startTime } : null;
 };
 
 export const isOwnProcess = (pid: number | null, self: number = process.pid): boolean => {
@@ -141,7 +213,25 @@ export const isOwnProcess = (pid: number | null, self: number = process.pid): bo
   while (current !== null && current > 1 && !seen.has(current)) {
     if (current === self) return true;
     seen.add(current);
-    current = parentPid(current);
+    current = readProcessStat(current)?.parentPid ?? null;
+  }
+  return false;
+};
+
+export const isProcessInFamily = (
+  pid: number | null,
+  targetPid: number,
+  targetStartTime: string,
+  readStat: (pid: number) => ProcessStat | null = readProcessStat
+): boolean => {
+  let current = pid;
+  const seen = new Set<number>();
+  while (current !== null && current > 1 && !seen.has(current)) {
+    const stat = readStat(current);
+    if (!stat) return false;
+    if (current === targetPid) return stat.startTime === targetStartTime;
+    seen.add(current);
+    current = stat.parentPid;
   }
   return false;
 };
@@ -157,10 +247,23 @@ export type TapOptions = {
   maxRestarts?: number;
   backoffMs?: number[];
   ownsProcess?: (pid: number | null) => boolean;
+  captureProcess?: (pid: number | null) => boolean;
+  processStat?: (pid: number) => ProcessStat | null;
 };
 
 export type TapState = { running: boolean; linked: number; restarts: number };
-export type TapTarget = { kind: 'screen' } | { kind: 'application'; processId: number };
+export type PortalTargetFields = {
+  portalGeneration?: string;
+  portalSourceType?: 1 | 2;
+  portalPipewireSerial?: string;
+  portalOutput?: string;
+  portalWindowClass?: string;
+  /** Opaque restore token data; never interpreted as a compositor address or PID. */
+  portalWindowHandle?: string;
+};
+export type TapTarget =
+  | ({ kind: 'screen' } & PortalTargetFields)
+  | ({ kind: 'application'; processId: number; processStartTime: string } & PortalTargetFields);
 
 /**
  * Records the selected application's process tree (or every *other* application for a screen)
@@ -185,6 +288,8 @@ export class TapCapture {
   private readonly runner: Runner;
   private readonly tapName: string;
   private readonly ownsProcess: (pid: number | null) => boolean;
+  private readonly captureProcess: (pid: number | null) => boolean;
+  private readonly processStat: (pid: number) => ProcessStat | null;
   private readonly log: (msg: string, ...rest: unknown[]) => void;
 
   constructor(private readonly options: TapOptions = {}) {
@@ -192,6 +297,8 @@ export class TapCapture {
     this.runner = options.runner ?? defaultRunner;
     this.tapName = options.tapName ?? 'sharkord_capture';
     this.ownsProcess = options.ownsProcess ?? ((pid) => isOwnProcess(pid));
+    this.captureProcess = options.captureProcess ?? ((pid) => isOwnProcess(pid));
+    this.processStat = options.processStat ?? readProcessStat;
     this.log = options.log ?? (() => {});
   }
 
@@ -216,14 +323,30 @@ export class TapCapture {
     return [...this.tappedPids];
   }
 
-  start(target: TapTarget = { kind: 'screen' }): void {
-    if (this.child || this.timer) return;
+  start(target: TapTarget = { kind: 'screen' }): boolean {
+    if (this.child || this.timer) return false;
+    const hasPortalMetadata = target.portalGeneration !== undefined ||
+      target.portalSourceType !== undefined || target.portalPipewireSerial !== undefined;
+    const validPortalMetadata = !hasPortalMetadata || (
+      PORTAL_GENERATION_PATTERN.test(target.portalGeneration ?? '') &&
+      /^[1-9][0-9]{0,19}$/.test(target.portalPipewireSerial ?? '') &&
+      (target.kind === 'screen'
+        ? target.portalSourceType === 1 && typeof target.portalOutput === 'string' &&
+          target.portalOutput.length > 0 && Buffer.byteLength(target.portalOutput, 'utf8') <= 512
+        : target.portalSourceType === 2 && typeof target.portalWindowClass === 'string' &&
+          target.portalWindowClass.length > 0 && Buffer.byteLength(target.portalWindowClass, 'utf8') <= 512)
+    );
+    if (!validPortalMetadata || (target.kind === 'application' && !this.hasCurrentTargetProcess(target))) {
+      this.log('selected capture identity changed or its portal metadata is incomplete');
+      return false;
+    }
     this.target = target;
     this.stopping = false;
     this.reconciling = null;
     this.reconcileGeneration += 1;
     this.restarts = 0;
     this.spawnChild();
+    return true;
   }
 
   stop(): void {
@@ -279,23 +402,75 @@ export class TapCapture {
     return promise;
   }
 
+  private hasCurrentTargetProcess(target: Extract<TapTarget, { kind: 'application' }>): boolean {
+    return target.kind === 'application' && this.processStat(target.processId)?.startTime === target.processStartTime;
+  }
+
   private async doReconcile(child: ChildProcessLike, generation: number): Promise<void> {
     const current = (): boolean => this.child === child && this.reconcileGeneration === generation && !this.stopping;
     if (!current()) return;
+    if (this.target.kind === 'application' && !this.hasCurrentTargetProcess(this.target)) {
+      this.log('selected application process identity changed during capture');
+      this.stop();
+      return;
+    }
 
     let graph: Graph;
     try {
-      graph = parseGraph(await this.runner('pw-dump', ['-i', '0']), this.tapName);
+      graph = parseGraph(await this.runner('pw-dump', ['-i', '0']), this.tapName, true);
     } catch (error) {
-      if (current()) this.log('could not inspect the pipewire graph:', error);
+      if (current()) {
+        this.log('could not inspect the pipewire graph; stopping capture:', error);
+        this.stop();
+      }
       return;
     }
-    if (!current() || graph.tapNodeId === null) return;
+    if (!current()) return;
+    if (graph.tapNodeId === null) {
+      // Startup may precede the tap node, but an established capture cannot keep unverified links.
+      if (this.linked.size > 0) this.stop();
+      return;
+    }
+    if (this.target.kind === 'application' && !this.hasCurrentTargetProcess(this.target)) {
+      this.log('selected application process identity changed during graph inspection');
+      this.stop();
+      return;
+    }
+
+    const portalPipewireSerial = this.target.portalPipewireSerial;
+    if (portalPipewireSerial !== undefined) {
+      const captureMatches = graph.videoCaptures.filter((capture) =>
+        this.captureProcess(capture.processId) && capture.targetSerials.length === 1 &&
+        capture.targetSerials[0] === portalPipewireSerial
+      );
+      if (captureMatches.length !== 1) {
+        for (const key of [...this.linked]) {
+          const [from, to] = key.split('->');
+          if (!current()) return;
+          try {
+            await this.runner('pw-link', ['-d', from!, `${graph.tapNodeId}:${to}`]);
+          } catch (error) {
+            if (current()) {
+              this.log('could not remove audio without the selected portal video session; stopping capture:', error);
+              this.stop();
+            }
+            return;
+          }
+          if (!current()) return;
+          this.linked.delete(key);
+        }
+        this.tappedPids.clear();
+        this.emitState();
+        return;
+      }
+    }
 
     const alive = new Set<number>();
     for (const stream of graph.streams) {
-      const allowed = !this.ownsProcess(stream.processId) &&
-        (this.target.kind === 'screen' || isOwnProcess(stream.processId, this.target.processId));
+      const allowed = stream.processId !== null && !this.ownsProcess(stream.processId) &&
+        (this.target.kind === 'screen' || isProcessInFamily(
+          stream.processId, this.target.processId, this.target.processStartTime, this.processStat
+        ));
       if (!allowed) {
         // Ownership can change while a node survives (e.g. the selected app
         // exits and its audio helper is reparented). Drop only our tap links.
@@ -327,6 +502,11 @@ export class TapCapture {
           try {
             await this.runner('pw-link', [`${stream.nodeId}:${port}`, `${graph.tapNodeId}:${target}`]);
             if (!current()) return;
+            if (this.target.kind === 'application' && !this.hasCurrentTargetProcess(this.target)) {
+              this.log('selected application process identity changed while attaching audio');
+              this.stop();
+              return;
+            }
             this.linked.add(key);
             if (stream.processId !== null) this.tappedPids.add(stream.processId);
             this.log(`tapped ${stream.appName || stream.nodeId}`);

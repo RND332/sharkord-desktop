@@ -18,10 +18,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { release as osRelease } from 'node:os';
 import { loadConfig } from './config';
+import { createPortalSelectionObserver, type PortalSelectionObserver } from './portal-selection';
 import { PcmDelivery } from './pcm-delivery';
 import { describeEnvironment, getLogsDirectory, initializeLogging, log, readLogTail } from './logger';
 import { removeLegacyRouting } from './legacy';
-import { resolveLinuxAudioTarget } from './linux-audio';
+import { bindPortalCaptureTarget, resolveLinuxAudioTarget } from './linux-audio';
 import { displayCapturerRequest, pickDisplaySource, registerPickerIpc } from './picker';
 import { isServerOrigin, normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
 import { runSelftest } from './selftest';
@@ -70,7 +71,12 @@ let currentServerUrl: string | null = null;
 const debugChunks: Buffer[] = [];
 let pendingWindowsTarget: WindowsCaptureTarget | null = null;
 let pendingLinuxTarget: TapTarget | null = null;
+let pendingLinuxAudioAbort: AbortController | null = null;
+let pendingLinuxSelectionObserver: PortalSelectionObserver | null = null;
+let pendingLinuxTargetExpiry: NodeJS.Timeout | null = null;
+const PENDING_LINUX_TARGET_TTL_MS = 15_000;
 let selectingLinuxAudio = false;
+let acquiringLinuxAudio = false;
 let selectingWindowsAudio = false;
 let acquiringWindowsAudio = false;
 let windowsCaptureSerial = 0;
@@ -79,7 +85,20 @@ let captureDocument = 0;
 const pcmDelivery = new PcmDelivery();
 let pcmSessionId: number | null = null;
 
+const discardPendingLinuxAudioGrant = (): void => {
+  const audioAbort = pendingLinuxAudioAbort;
+  const observer = pendingLinuxSelectionObserver;
+  pendingLinuxAudioAbort = null;
+  pendingLinuxSelectionObserver = null;
+  pendingLinuxTarget = null;
+  audioAbort?.abort();
+  if (observer?.isActive) observer.stop();
+  if (pendingLinuxTargetExpiry) clearTimeout(pendingLinuxTargetExpiry);
+  pendingLinuxTargetExpiry = null;
+};
+
 const stopDocumentCapture = (): void => {
+  discardPendingLinuxAudioGrant();
   pcmDelivery.stop();
   pcmSessionId = null;
   captureDocument += 1;
@@ -88,7 +107,6 @@ const stopDocumentCapture = (): void => {
   acquiringWindowsAudio = false;
   pendingWindowsTarget = null;
   captureSource?.stop();
-  pendingLinuxTarget = null;
   selectingLinuxAudio = false;
 };
 
@@ -122,7 +140,9 @@ const installPermissionHandlers = (origin: () => string): void => {
     const linuxAudio = process.platform === 'linux' && request.audioRequested && captureSource !== null;
     const documentVersion = captureDocument;
     let completed = false;
-    if (linuxAudio && (selectingLinuxAudio || pendingLinuxTarget !== null || pcmSessionId !== null)) {
+    let linuxAudioAbort: AbortController | null = null;
+    let portalObserver: PortalSelectionObserver | null = null;
+    if (linuxAudio && (selectingLinuxAudio || acquiringLinuxAudio || pendingLinuxTarget !== null || pcmSessionId !== null)) {
       log('another Linux audio share is already active or being selected');
       callback(null!);
       return;
@@ -130,6 +150,8 @@ const installPermissionHandlers = (origin: () => string): void => {
     if (linuxAudio) {
       selectingLinuxAudio = true;
       pendingLinuxTarget = null;
+      linuxAudioAbort = new AbortController();
+      pendingLinuxAudioAbort = linuxAudioAbort;
     }
     if (windowsAudio && (selectingWindowsAudio || acquiringWindowsAudio || activeWindowsSession !== null)) {
       log('another Windows audio share is already active');
@@ -146,6 +168,23 @@ const installPermissionHandlers = (origin: () => string): void => {
     const wantsSystemPicker = process.env.SHARKORD_PICKER === 'system' || (wayland && process.env.SHARKORD_PICKER !== 'inapp');
 
     try {
+      if (linuxAudio && wayland && wantsSystemPicker) {
+        portalObserver = createPortalSelectionObserver();
+        pendingLinuxSelectionObserver = portalObserver;
+        linuxAudioAbort?.signal.addEventListener('abort', () => portalObserver?.stop(), { once: true });
+        let observerReady = false;
+        try {
+          observerReady = await portalObserver.start();
+        } catch {
+          observerReady = false;
+        }
+        if (!observerReady || linuxAudioAbort?.signal.aborted) {
+          portalObserver.stop();
+          if (pendingLinuxSelectionObserver === portalObserver) pendingLinuxSelectionObserver = null;
+          portalObserver = null;
+          log('Hyprland portal selection metadata is unavailable; this share will remain video-only');
+        }
+      }
       const capturer = displayCapturerRequest({
         platform: process.platform,
         osRelease: osRelease(),
@@ -189,29 +228,49 @@ const installPermissionHandlers = (origin: () => string): void => {
         return;
       }
       const haveOwnCapture = captureSource !== null;
-      if (process.platform === 'linux' && request.audioRequested && captureSource) {
-        const target = await resolveLinuxAudioTarget(picked, {
-          wayland,
-          choose: async (windows) => {
-            const result = await dialog.showMessageBox(mainWindow!, {
-              type: 'question',
-              title: 'Screen-share audio',
-              message: 'Which application did you select in the system picker?',
-              detail: 'Wayland does not identify the selected window to Electron. Choose its application below, or share video only. Application audio includes ALL windows and tabs of that application (including Chrome). Choose entire-screen audio ONLY if you selected an entire screen: it includes all other applications.',
-              buttons: ['Video only', 'I selected an entire screen — share all other apps',
-                ...windows.map((window) => `${window.title || window.appClass} (${window.appClass}, PID ${window.processId})`)],
-              defaultId: 0,
-              cancelId: 0,
-              noLink: true
-            });
-            return result.response;
-          }
-        });
-        if (documentVersion !== captureDocument || request.frame !== mainWindow?.webContents.mainFrame) {
+      if (linuxAudio && captureSource) {
+        const selection = wayland && portalObserver
+          ? await portalObserver.selectionAfterCapture()
+          : null;
+        if (documentVersion !== captureDocument || request.frame !== mainWindow?.webContents.mainFrame || linuxAudioAbort?.signal.aborted) {
           callback(null!);
           return;
         }
-        pendingLinuxTarget = target;
+        const target = await resolveLinuxAudioTarget(picked, {
+          wayland,
+          selection,
+          windowWitness: portalObserver?.windowContinuity
+        });
+        if (wayland && !target) {
+          log(selection?.sourceType === 1
+            ? 'Hyprland selected monitor metadata was not bound; this share will remain video-only'
+            : selection
+              ? 'Hyprland selected-window metadata had no unique continuous pre-picker process identity; this share will remain video-only'
+              : 'No verified Hyprland capture metadata was returned; this share will remain video-only');
+        }
+        if (documentVersion !== captureDocument || request.frame !== mainWindow?.webContents.mainFrame || linuxAudioAbort?.signal.aborted) {
+          callback(null!);
+          return;
+        }
+        pendingLinuxTarget = wayland && target && !portalObserver?.isActive ? null : target;
+        if (wayland && target && !pendingLinuxTarget) {
+          log('Hyprland portal session changed before capture; this share will remain video-only');
+        }
+        if (pendingLinuxTarget) {
+          if (pendingLinuxTargetExpiry) clearTimeout(pendingLinuxTargetExpiry);
+          const expectedTarget = pendingLinuxTarget;
+          pendingLinuxTargetExpiry = setTimeout(() => {
+            if (pendingLinuxTarget !== expectedTarget) return;
+            pendingLinuxTarget = null;
+            pendingLinuxTargetExpiry = null;
+            pendingLinuxSelectionObserver?.stop();
+            pendingLinuxSelectionObserver = null;
+            pendingLinuxAudioAbort?.abort();
+            pendingLinuxAudioAbort = null;
+            log('selected application capture grant expired; audio remains off for this share');
+          }, PENDING_LINUX_TARGET_TTL_MS);
+          pendingLinuxTargetExpiry.unref();
+        }
       }
       if (windowsAudio && windowsCapture) pendingWindowsTarget = windowsTargetForSource(picked.id);
       const wantsBrowserAudio = request.audioRequested && process.platform === 'darwin';
@@ -219,7 +278,12 @@ const installPermissionHandlers = (origin: () => string): void => {
         'screen share source:',
         JSON.stringify({
           name: picked.name,
-          linuxAudioTarget: process.platform === 'linux' ? pendingLinuxTarget : undefined,
+          linuxAudioTarget: process.platform === 'linux' && pendingLinuxTarget
+            ? {
+                kind: pendingLinuxTarget.kind,
+                ...(pendingLinuxTarget.kind === 'application' ? { processId: pendingLinuxTarget.processId } : {})
+              }
+            : undefined,
           of: sources.length,
           picker: wantsSystemPicker ? 'system' : 'in-app',
           audio: request.audioRequested
@@ -237,8 +301,14 @@ const installPermissionHandlers = (origin: () => string): void => {
       log('screen share failed:', error);
       if (!completed) callback(null!);
     } finally {
+      const keepLinuxGrant = linuxAudio && pendingLinuxTarget !== null && (!wayland || portalObserver?.isActive === true);
+      if (portalObserver && !keepLinuxGrant) portalObserver.stop();
+      if (!keepLinuxGrant && pendingLinuxSelectionObserver === portalObserver) pendingLinuxSelectionObserver = null;
       if (windowsAudio && documentVersion === captureDocument) selectingWindowsAudio = false;
-      if (linuxAudio && documentVersion === captureDocument) selectingLinuxAudio = false;
+      if (linuxAudio && documentVersion === captureDocument) {
+        selectingLinuxAudio = false;
+        if (!keepLinuxGrant && pendingLinuxAudioAbort === linuxAudioAbort) pendingLinuxAudioAbort = null;
+      }
     }
   });
 };
@@ -256,13 +326,67 @@ const registerIpc = (): void => {
     if (!captureSource) throw new Error('this platform has no capture of its own');
     if (!windowsCapture) {
       if (pcmSessionId !== null) throw new Error('another audio share is already active');
-      const target = pendingLinuxTarget;
+      let target = pendingLinuxTarget;
       pendingLinuxTarget = null;
+      if (pendingLinuxTargetExpiry) clearTimeout(pendingLinuxTargetExpiry);
+      pendingLinuxTargetExpiry = null;
       if (!target) throw new Error('no Linux audio source was selected');
-      pcmSessionId = ++windowsCaptureSerial;
-      pcmDelivery.start(pcmSessionId);
-      tap.start(target);
-      return pcmSessionId;
+      if (acquiringLinuxAudio) throw new Error('another Linux audio share is already being acquired');
+      acquiringLinuxAudio = true;
+      const observer = pendingLinuxSelectionObserver;
+      const audioAbort = pendingLinuxAudioAbort;
+      const documentVersion = captureDocument;
+      const isCurrentAcquisition = () =>
+        documentVersion === captureDocument &&
+        event.sender === mainWindow?.webContents &&
+        event.senderFrame === mainWindow.webContents.mainFrame &&
+        audioAbort !== null && !audioAbort.signal.aborted;
+      const assertCurrentAcquisition = () => {
+        if (!isCurrentAcquisition()) throw new Error('Linux audio acquisition was cancelled');
+      };
+      try {
+        assertCurrentAcquisition();
+        if (target.portalGeneration) {
+          const boundTarget = await bindPortalCaptureTarget(
+            target,
+            () => observer?.selections ?? [],
+            { isActive: () => isCurrentAcquisition() && observer?.isActive === true, tapName: tap.tapNode }
+          );
+          assertCurrentAcquisition();
+          if (!boundTarget) {
+            log('selected portal video session could not be bound to this share; capture audio remains off');
+            throw new Error('the active portal video session did not match this selection');
+          }
+          target = boundTarget;
+        }
+        if (target.portalGeneration && observer?.isActive !== true) {
+          log('portal selection observer became inactive before audio capture; this share remains video-only');
+          throw new Error('the portal selection is no longer active');
+        }
+        if (target.kind === 'application' && target.portalGeneration && target.portalSourceType === 2) {
+          const continuous = await observer?.verifyWindowTarget({
+            processId: target.processId,
+            processStartTime: target.processStartTime,
+            portalWindowClass: target.portalWindowClass ?? ''
+          });
+          assertCurrentAcquisition();
+          if (!continuous) {
+            log('selected window process continuity changed before audio capture; this share remains video-only');
+            throw new Error('the selected window process is no longer continuous');
+          }
+        }
+        assertCurrentAcquisition();
+        if (!tap.start(target)) throw new Error('the selected application process is no longer the same process');
+        pcmSessionId = ++windowsCaptureSerial;
+        pcmDelivery.start(pcmSessionId);
+        return pcmSessionId;
+      } finally {
+        if (pendingLinuxAudioAbort === audioAbort) pendingLinuxAudioAbort = null;
+        audioAbort?.abort();
+        if (observer?.isActive) observer.stop();
+        if (pendingLinuxSelectionObserver === observer) pendingLinuxSelectionObserver = null;
+        acquiringLinuxAudio = false;
+      }
     }
     if (acquiringWindowsAudio || activeWindowsSession !== null) throw new Error('another audio share is already active');
     const target = pendingWindowsTarget;
@@ -737,7 +861,7 @@ const bootstrap = async (): Promise<void> => {
     log('page capture mode:', JSON.stringify(details));
     if (process.platform === 'linux' && details.mode === 'system-audio-unavailable' &&
       _event.sender === mainWindow?.webContents && _event.senderFrame === _event.sender.mainFrame &&
-      pcmSessionId === null && !selectingLinuxAudio) pendingLinuxTarget = null;
+      pcmSessionId === null && !selectingLinuxAudio) discardPendingLinuxAudioGrant();
 
     // A new share always gets its own verdict, so an old warning does not silence a new one.
     if (details.mode === 'captured-pcm') {

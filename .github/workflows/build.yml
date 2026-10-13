@@ -9,13 +9,18 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - name: Install Linux native build/test dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libsystemd-dev dbus
       - run: bun install --frozen-lockfile
+      - name: Install Electron before parallel tests
+        run: bunx install-electron --no
       - run: bun run typecheck
       - run: bunx vitest run
+      - run: bun run test:native-portal
 
   package:
     needs: test
@@ -23,7 +28,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
+            command: bun run dist:linux
+          - os: ubuntu-22.04-arm
             command: bun run dist:linux
           - os: windows-latest
             command: bun run dist:win
@@ -34,13 +41,77 @@ jobs:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
-      - name: Packaging dependencies
+      - name: Linux packaging and native dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libarchive-tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libsystemd-dev dbus libarchive-tools squashfs-tools
+      - name: Native portal helper tests (private D-Bus)
+        if: runner.os == 'Linux'
+        run: bun run test:native-portal
       - name: Package
         run: ${{ matrix.command }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Verify Linux native package contents
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64)
+              arch=x64
+              channel=latest-linux.yml
+              ;;
+            aarch64)
+              arch=arm64
+              channel=latest-linux-arm64.yml
+              ;;
+            *)
+              echo "Unexpected Linux runner architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          test -s "release/$channel"
+          python3 - "$arch" <<'PY'
+          import hashlib, os, pathlib, subprocess, sys
+          arch = sys.argv[1]
+          name = f'portal-metadata-linux-{arch}'
+          built = pathlib.Path('native/out') / name
+          helpers = list(pathlib.Path('release').glob(f'linux*-unpacked/resources/native/{name}'))
+          assert len(helpers) == 1, helpers
+          assert os.access(helpers[0], os.X_OK), helpers[0]
+          expected = built.read_bytes()
+          assert helpers[0].read_bytes() == expected, 'unpacked helper differs from build'
+          archives = [p for p in pathlib.Path('release').iterdir()
+                      if p.suffix in ('.AppImage', '.deb', '.pacman')]
+          assert len(archives) == 3, archives
+          assert {p.suffix for p in archives} == {'.AppImage', '.deb', '.pacman'}
+          suffix = f'/resources/native/{name}'
+          def command(args, data=None):
+              return subprocess.check_output(args, input=data)
+          for archive in sorted(archives):
+              if archive.suffix == '.AppImage':
+                  offset = str(int(command([str(archive.resolve()), '--appimage-offset']).strip()))
+                  entries = command(['unsquashfs', '-o', offset, '-ls', str(archive)]).decode().splitlines()
+                  members = [s for s in entries if s.endswith(suffix)]
+                  assert len(members) == 1, (archive, members)
+                  member = members[0].removeprefix('squashfs-root/')
+                  actual = command(['unsquashfs', '-o', offset, '-cat', str(archive), member])
+              else:
+                  if archive.suffix == '.deb':
+                      entries = command(['ar', 't', str(archive)]).decode().splitlines()
+                      data_members = [s for s in entries if s.startswith('data.tar.')]
+                      assert len(data_members) == 1, (archive, data_members)
+                      data = command(['ar', 'p', str(archive), data_members[0]])
+                  else:
+                      data = archive.read_bytes()
+                  entries = command(['bsdtar', '-tf', '-'], data).decode().splitlines()
+                  members = [s for s in entries if s.endswith(suffix)]
+                  assert len(members) == 1, (archive, members)
+                  member = members[0]
+                  actual = command(['bsdtar', '-xOf', '-', member], data)
+              assert actual == expected, f'{archive}: packaged helper differs from build'
+              print(f'{archive.name}: verified {member} sha256={hashlib.sha256(actual).hexdigest()}')
+          PY
       - name: Check Windows audio verification tools
         if: runner.os == 'Windows'
         shell: powershell
@@ -85,4 +156,5 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**
+          draft: true
           generate_release_notes: true

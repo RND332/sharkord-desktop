@@ -2,7 +2,7 @@
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { TapCapture, defaultRunner, parseGraph } from '../src/main/tap';
+import { TapCapture, defaultRunner, parseGraph, readProcessIdentity } from '../src/main/tap';
 import { writeWav } from '../src/main/wav';
 
 const scratch = process.env.TMPDIR;
@@ -49,7 +49,11 @@ try {
   await delay(300);
   tap.onData((chunk) => chunks.push(chunk));
   const screen = process.argv.includes('--screen');
-  tap.start(screen || process.argv.includes('--baseline') ? { kind: 'screen' } : { kind: 'application', processId: selectedPid });
+  const identity = process.argv.includes('--baseline') || screen ? null : readProcessIdentity(selectedPid);
+  if (!screen && !process.argv.includes('--baseline') && !identity) throw new Error('fixture process identity unavailable');
+  tap.start(screen || process.argv.includes('--baseline')
+    ? { kind: 'screen' }
+    : { kind: 'application', processId: selectedPid, processStartTime: identity!.startTime });
   await delay(2500);
   await tap.reconcile();
   const linkedPids = tap.tappedProcessIds;

@@ -15,6 +15,9 @@ if (process.platform === 'win32') {
     stdio: 'inherit'
   });
 }
+if (process.platform === 'linux') {
+  execFileSync(process.execPath, ['scripts/build-linux-native.mjs'], { stdio: 'inherit' });
+}
 
 await rm('dist', { recursive: true, force: true });
 await mkdir('dist', { recursive: true });
