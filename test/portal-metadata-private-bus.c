@@ -83,7 +83,10 @@ static int create_foreign_connection(char *unique_name, size_t name_size, int *r
     if (sd_bus_open_user(&bus) < 0 || sd_bus_get_unique_name(bus, &name) < 0 || !name) _exit(2);
     if (write(ready[1], name, strlen(name) + 1u) < 0) _exit(3);
     char byte;
-    (void)read(release[0], &byte, 1);
+    if (read(release[0], &byte, 1) != 1) {
+      sd_bus_unref(bus);
+      _exit(4);
+    }
     sd_bus_unref(bus);
     _exit(0);
   }
@@ -427,7 +430,10 @@ unexpected:
 finish:
   if (helper_pid > 0) stop_helper();
   if (foreign_release_fd >= 0) {
-    (void)write(foreign_release_fd, "x", 1);
+    if (write(foreign_release_fd, "x", 1) != 1) {
+      fprintf(stderr, "could not release the foreign fixture connection\n");
+      result = 1;
+    }
     close(foreign_release_fd);
   }
   if (foreign_pid > 0) (void)waitpid(foreign_pid, NULL, 0);

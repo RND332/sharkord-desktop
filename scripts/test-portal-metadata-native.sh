@@ -9,11 +9,11 @@ trap 'rm -rf "$test_dir"' EXIT
 
 read -r -a systemd_cflags <<< "$(pkg-config --cflags libsystemd)"
 read -r -a systemd_libs <<< "$(pkg-config --libs libsystemd)"
-cc -std=c11 -Wall -Wextra -Werror -O2 -DPORTAL_TEST_COUNTERS \
+cc -std=c11 -Wall -Wextra -Werror -O2 -D_FORTIFY_SOURCE=2 -DPORTAL_TEST_COUNTERS \
   "${systemd_cflags[@]}" \
   "$repo_root/native/linux/portal-metadata.c" \
   -o "$test_dir/portal-metadata" "${systemd_libs[@]}"
-cc -std=c11 -Wall -Wextra -Werror -O2 \
+cc -std=c11 -Wall -Wextra -Werror -O2 -D_FORTIFY_SOURCE=2 \
   "${systemd_cflags[@]}" \
   "$repo_root/test/portal-metadata-private-bus.c" \
   -o "$test_dir/private-bus-test" "${systemd_libs[@]}"
