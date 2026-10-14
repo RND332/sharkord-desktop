@@ -1,4 +1,5 @@
 import { installGetDisplayMediaPatch, type PatchEnvironment } from './index';
+import { installAudioPlaybackRecovery } from './audio-playback-recovery';
 
 /** A quiet version marker in the top-left corner, next to nothing the client itself renders there. */
 const showVersionBadge = (bridge: { appInfo?(): Promise<{ version: string }> }): void => {
@@ -43,6 +44,8 @@ const globals = globalThis as {
 const bridge = globals.sharkordDesktop;
 const Generator = globals.MediaStreamTrackGenerator;
 const AudioDataCtor = globals.AudioData;
+
+if (bridge) installAudioPlaybackRecovery();
 
 if (!bridge) {
   console.warn('[sharkord-desktop] preload bridge missing, screen-share audio not patched');
