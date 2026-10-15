@@ -63,6 +63,37 @@ beforeEach(() => {
 afterEach(() => {
   restoreLog?.();
   restoreLog = null;
+  vi.unstubAllGlobals();
+});
+
+describe('preload bridge: global voice shortcuts', () => {
+  it('rejects anything outside the two voice shortcut codes', async () => {
+    const dispatchEvent = vi.fn();
+    vi.stubGlobal('window', { dispatchEvent });
+    await loadBridge();
+    for (const code of [undefined, null, 5, {}, 'KeyQ', 'Control+Shift+M']) {
+      electron.emit('voice:shortcut', code);
+    }
+    expect(dispatchEvent).not.toHaveBeenCalled();
+  });
+
+  it.each(['KeyM', 'KeyD'])('forwards %s to the existing app keyboard handler', async (code) => {
+    const dispatchEvent = vi.fn();
+    vi.stubGlobal('window', { dispatchEvent });
+    vi.stubGlobal('KeyboardEvent', class {
+      constructor(public type: string, options: KeyboardEventInit) {
+        Object.assign(this, options);
+      }
+    });
+    await loadBridge();
+
+    electron.emit('voice:shortcut', code);
+
+    expect(dispatchEvent).toHaveBeenCalledTimes(1);
+    expect(dispatchEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'keydown', code, key: code.slice(3), ctrlKey: true, shiftKey: true, repeat: false
+    }));
+  });
 });
 
 describe('preload bridge: capture sessions', () => {
