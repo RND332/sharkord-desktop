@@ -4,6 +4,18 @@ import { PickerPayload } from '../main/picker';
 type PcmCallback = (chunk: Uint8Array, firstSample?: number) => void;
 const pcmListeners = new Set<PcmCallback>();
 
+ipcRenderer.on('voice:shortcut', (_event, code: unknown) => {
+  if (code !== 'KeyM' && code !== 'KeyD') return;
+  window.dispatchEvent(new KeyboardEvent('keydown', {
+    code,
+    key: code.slice(3),
+    ctrlKey: true,
+    shiftKey: true,
+    repeat: false,
+    cancelable: true
+  }));
+});
+
 ipcRenderer.on('pcm', (_event, chunk: Uint8Array, sessionId?: number, sequence?: number, firstSample?: number) => {
   try {
     if (session !== null ? sessionId !== session : typeof sessionId === 'number') return;

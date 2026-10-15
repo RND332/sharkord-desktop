@@ -30,6 +30,7 @@ import { TapCapture, type TapTarget } from './tap';
 import { WindowsCapture, helperExists, windowsTargetForSource, type WindowsCaptureTarget } from './windows-capture';
 import { checkForUpdatesNow, installPendingUpdateSilently, setupAutoUpdates } from './updater';
 import { writeWav } from './wav';
+import { startWindowsVoiceShortcuts } from './windows-voice-shortcuts';
 
 initializeLogging();
 
@@ -66,6 +67,7 @@ const captureKind = windowsCapture ? 'windows' : captureSource ? 'pipewire' : 'n
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let shuttingDown = false;
+let stopVoiceShortcuts: (() => void) | null = null;
 let allowedOrigin = '';
 let currentServerUrl: string | null = null;
 const debugChunks: Buffer[] = [];
@@ -450,6 +452,8 @@ const registerIpc = (): void => {
 const shutdown = async (code: number, options: { quit?: boolean } = {}): Promise<void> => {
   if (shuttingDown) return;
   shuttingDown = true;
+  stopVoiceShortcuts?.();
+  stopVoiceShortcuts = null;
   log(`shutting down (code ${code}${options.quit === false ? ', exiting directly' : ''})`);
   try {
     captureSource?.stop();
@@ -622,6 +626,17 @@ const bootstrap = async (): Promise<void> => {
   };
 
   const window = createWindow();
+
+  stopVoiceShortcuts = startWindowsVoiceShortcuts((code) => {
+    const target = mainWindow;
+    if (shuttingDown || !target || target.isDestroyed() || target.webContents.isDestroyed() ||
+        target.webContents.isCrashed() || !isServerOrigin(target.webContents.getURL(), allowedOrigin)) return;
+    try {
+      target.webContents.send('voice:shortcut', code);
+    } catch (error) {
+      log('could not deliver the global voice shortcut:', error);
+    }
+  }, log);
 
   const connectPagePath = join(__dirname, 'connect.html');
   const serverConfigPath = join(app.getPath('userData'), 'config.json');

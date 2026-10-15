@@ -22,6 +22,9 @@ try {
     & cl.exe /nologo /std:c++17 /EHsc /O2 /W4 /DUNICODE /D_UNICODE native\windows\win-audio-capture.cpp /Fo:native\out\win-audio-capture.obj /Fe:native\out\win-audio-capture.exe /link ole32.lib mmdevapi.lib user32.lib
     if ($LASTEXITCODE -ne 0) { throw "Windows audio helper compilation failed ($LASTEXITCODE)." }
     if (-not (Test-Path native\out\win-audio-capture.exe)) { throw 'The Windows audio helper was not produced.' }
+    & cl.exe /nologo /std:c++17 /EHsc /O2 /W4 /DUNICODE /D_UNICODE native\windows\win-voice-shortcuts.cpp /Fo:native\out\win-voice-shortcuts.obj /Fe:native\out\win-voice-shortcuts.exe /link user32.lib
+    if ($LASTEXITCODE -ne 0) { throw "Windows voice shortcut helper compilation failed ($LASTEXITCODE)." }
+    if (-not (Test-Path native\out\win-voice-shortcuts.exe)) { throw 'The Windows voice shortcut helper was not produced.' }
 } finally {
     Pop-Location
 }

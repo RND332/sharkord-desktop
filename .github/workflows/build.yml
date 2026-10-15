@@ -116,6 +116,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: ./scripts/windows-audio-smoke.ps1 -CheckOnly
+      - name: Verify native Windows background voice shortcuts
+        if: runner.os == 'Windows'
+        run: bun run test:windows-shortcuts
+      - name: Upload Windows shortcut verification
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-shortcut-verification
+          path: test-results/windows-shortcuts.json
+          if-no-files-found: error
       - name: Upload Windows audio verification kit
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
