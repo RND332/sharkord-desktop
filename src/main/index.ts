@@ -20,7 +20,7 @@ import { release as osRelease } from 'node:os';
 import { loadConfig } from './config';
 import { createPortalSelectionObserver, type PortalSelectionObserver } from './portal-selection';
 import { PcmDelivery } from './pcm-delivery';
-import { describeEnvironment, getLogsDirectory, initializeLogging, log, readLogTail } from './logger';
+import { attachRendererConsoleLogging, describeEnvironment, getLogsDirectory, initializeLogging, log, readLogTail } from './logger';
 import { removeLegacyRouting } from './legacy';
 import { bindPortalCaptureTarget, resolveLinuxAudioTarget } from './linux-audio';
 import { displayCapturerRequest, pickDisplaySource, registerPickerIpc } from './picker';
@@ -522,6 +522,7 @@ const bootstrap = async (): Promise<void> => {
   };
 
   const attachWindow = (window: BrowserWindow): void => {
+    attachRendererConsoleLogging(window.webContents, config.verboseLogs);
     const webUrl = (raw: string): URL | null => {
       let url: URL;
       try {

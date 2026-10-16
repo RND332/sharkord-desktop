@@ -25,6 +25,8 @@ export type Config = {
   selftest: boolean;
   /** Tear down leftovers from an older version and exit. */
   cleanup: boolean;
+  /** Record the client's whole console, not just its errors and warnings. */
+  verboseLogs: boolean;
 };
 
 const argValue = (argv: string[], name: string): string | null => {
@@ -45,5 +47,6 @@ export const loadConfig = (
   debugPcm: env.SHARKORD_DEBUG_PCM ?? null,
   legacyStatePath: join(env.XDG_RUNTIME_DIR ?? homedir(), 'sharkord-desktop.json'),
   selftest: argv.includes('--selftest'),
-  cleanup: argv.includes('--cleanup')
+  cleanup: argv.includes('--cleanup'),
+  verboseLogs: argv.includes('--verbose-logs')
 });
