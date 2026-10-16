@@ -31,6 +31,14 @@ describe('loadConfig', () => {
     });
   });
 
+  it('reports client errors only when a sentry dsn is configured', () => {
+    expect(loadConfig([], {}).sentryDsn).toBeNull();
+    expect(
+      loadConfig([], { SHARKORD_SENTRY_DSN: 'https://key@errors.example.com/3' })
+        .sentryDsn
+    ).toBe('https://key@errors.example.com/3');
+  });
+
   it('recognises the maintenance flags', () => {
     expect(loadConfig(['--selftest'], {}).selftest).toBe(true);
     expect(loadConfig(['--cleanup'], {}).cleanup).toBe(true);

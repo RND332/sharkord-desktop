@@ -19,6 +19,8 @@ export type Config = {
   tapName: string;
   /** Dump the recorded PCM to this path (verification/debugging). */
   debugPcm: string | null;
+  /** Where client errors are reported; null keeps reporting off. */
+  sentryDsn: string | null;
   /** Where the first design kept its virtual-sink state; only used for cleanup. */
   legacyStatePath: string;
   /** Run the tone-exclusion self test instead of the normal UI. */
@@ -45,6 +47,7 @@ export const loadConfig = (
   mode: resolveMode(platform),
   tapName: env.SHARKORD_TAP_NAME ?? 'sharkord_capture',
   debugPcm: env.SHARKORD_DEBUG_PCM ?? null,
+  sentryDsn: env.SHARKORD_SENTRY_DSN ?? null,
   legacyStatePath: join(env.XDG_RUNTIME_DIR ?? homedir(), 'sharkord-desktop.json'),
   selftest: argv.includes('--selftest'),
   cleanup: argv.includes('--cleanup'),

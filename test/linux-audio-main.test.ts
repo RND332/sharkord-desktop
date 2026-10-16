@@ -53,7 +53,11 @@ vi.mock('electron', () => ({
   app: Object.assign(new EventEmitter(), {
     requestSingleInstanceLock: () => true, whenReady: () => Promise.resolve(),
     getGPUInfo: async () => ({}), getGPUFeatureStatus: () => ({}), configureHostResolver() {},
-    getPath: () => '/home/rnd332/.hermes/cache/scratch', exit() {}, quit() {}
+    getPath: () => '/home/rnd332/.hermes/cache/scratch', exit() {}, quit() {},
+    getAppPath: () => '/home/rnd332/.hermes/cache/scratch', getName: () => 'Sharkord',
+    getVersion: () => '0.0.0-test', getLocale: () => 'en-US', isPackaged: true,
+    setPath() {}, disableHardwareAcceleration() {},
+    commandLine: { appendSwitch() {}, hasSwitch: () => false }
   }),
   BrowserWindow: class extends EventEmitter {
     webContents = Object.assign(new EventEmitter(), {
