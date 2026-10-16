@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 
 export type ChildProcessLike = {
   stdout: { on(event: 'data', cb: (chunk: Buffer) => void): void } | null;
@@ -12,11 +12,13 @@ export type ChildProcessLike = {
 export type Spawner = (bin: string, args: string[]) => ChildProcessLike;
 export type Runner = (bin: string, args: string[]) => Promise<string>;
 
+export type GraphPort = { id: number; name: string };
+
 export type GraphStream = {
   nodeId: number;
   appName: string;
   processId: number | null;
-  ports: string[];
+  ports: GraphPort[];
 };
 
 export type GraphVideoCapture = {
@@ -25,7 +27,7 @@ export type GraphVideoCapture = {
   targetSerials: string[];
 };
 
-export type Graph = { streams: GraphStream[]; tapNodeId: number | null; videoCaptures: GraphVideoCapture[] };
+export type Graph = { streams: GraphStream[]; tapNodeId: number | null; tapPorts: GraphPort[]; videoCaptures: GraphVideoCapture[] };
 
 const defaultSpawner: Spawner = (bin, args) =>
   spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] }) as unknown as ChildProcessLike;
@@ -54,28 +56,52 @@ const safeSerial = (value: unknown): string | null => {
   return null;
 };
 
+const isLocalPulseServer = (pid: number): boolean => {
+  try {
+    const peer = statSync(`/proc/${pid}/exe`);
+    return ['/usr/bin/pipewire-pulse', '/bin/pipewire-pulse'].some((path) => {
+      try {
+        const binary = statSync(path);
+        return binary.uid === 0 && (binary.mode & 0o022) === 0 &&
+          binary.dev === peer.dev && binary.ino === peer.ino;
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
+};
+
 /**
- * Reads audio output, capture video, and the tap from `pw-dump`. PipeWire global node IDs are
- * transient; portal serials are resolved from the referenced source node's `object.serial`.
+ * reads audio/video nodes and numeric link endpoints from `pw-dump`.
+ * portal serials come from the referenced video source, not its recyclable node ID.
  */
-export const parseGraph = (json: string, tapName: string, strict = false): Graph => {
+export const parseGraph = (
+  json: string,
+  tapName: string,
+  strict = false,
+  pulseServer: (pid: number) => boolean = isLocalPulseServer
+): Graph => {
   let objects: unknown;
   try {
     objects = JSON.parse(json);
   } catch {
     if (strict) throw new Error('PipeWire graph is not valid JSON');
-    return { streams: [], tapNodeId: null, videoCaptures: [] };
+    return { streams: [], tapNodeId: null, tapPorts: [], videoCaptures: [] };
   }
   if (!Array.isArray(objects)) {
     if (strict) throw new Error('PipeWire graph is not an object array');
-    return { streams: [], tapNodeId: null, videoCaptures: [] };
+    return { streams: [], tapNodeId: null, tapPorts: [], videoCaptures: [] };
   }
 
   const streams: GraphStream[] = [];
   const rawVideoCaptures: Array<{ nodeId: number; processId: number | null; clientId: number | null; refs: unknown[] }> = [];
-  const portsByNode = new Map<number, string[]>();
+  const portsByNode = new Map<number, GraphPort[]>();
+  const inputsByNode = new Map<number, GraphPort[]>();
   const clientPids = new Map<number, number>();
   const audioClientPids = new Map<number, number>();
+  const pulseServers = new Map<number, boolean>();
   const streamClients = new Map<number, number>();
   const videoNodeSerials = new Map<number, string>();
   let tapNodeId: number | null = null;
@@ -92,12 +118,21 @@ export const parseGraph = (json: string, tapName: string, strict = false): Graph
     if (record.type === 'PipeWire:Interface:Client' && id !== null) {
       const pid = num(props['application.process.id']);
       if (pid !== null) clientPids.set(id, pid);
-      // Audio consent uses the protocol's read-only peer PID, never a node's
-      // self-reported application PID. A proxy's differing application claim
-      // does not authenticate its underlying client, so omit that audio.
       const peerPid = num(props['pipewire.sec.pid']);
-      if (peerPid !== null && (props['application.process.id'] === undefined || pid === peerPid)) {
-        audioClientPids.set(id, peerPid);
+      if (peerPid !== null) {
+        if (!pulseServers.has(peerPid)) pulseServers.set(peerPid, pulseServer(peerPid));
+        const verifiedBroker = pulseServers.get(peerPid) === true;
+        const pulseClient = props['client.api'] === 'pipewire-pulse';
+        if (verifiedBroker) {
+          // the broker PID never identifies the originating PulseAudio application.
+          if (pulseClient && pid !== null && pid !== peerPid &&
+              props['pulse.server.type'] === 'unix' &&
+              num(props['pipewire.sec.uid']) === process.getuid?.()) {
+            audioClientPids.set(id, pid);
+          }
+        } else if (!pulseClient && (props['application.process.id'] === undefined || pid === peerPid)) {
+          audioClientPids.set(id, peerPid);
+        }
       }
     }
 
@@ -136,11 +171,16 @@ export const parseGraph = (json: string, tapName: string, strict = false): Graph
 
     // PipeWire spells this "out" in the port properties and "output" in the port info.
     const direction = String(props['port.direction'] ?? record.info?.direction ?? '');
-    if (record.type === 'PipeWire:Interface:Port' && (direction === 'out' || direction === 'output')) {
+    if (record.type === 'PipeWire:Interface:Port' && id !== null) {
       const owner = num(props['node.id']);
       const name = props['port.name'];
       if (owner === null || typeof name !== 'string') continue;
-      portsByNode.set(owner, [...(portsByNode.get(owner) ?? []), name]);
+      const port = { id, name };
+      if (direction === 'out' || direction === 'output') {
+        portsByNode.set(owner, [...(portsByNode.get(owner) ?? []), port]);
+      } else if (direction === 'in' || direction === 'input') {
+        inputsByNode.set(owner, [...(inputsByNode.get(owner) ?? []), port]);
+      }
     }
   }
 
@@ -170,7 +210,7 @@ export const parseGraph = (json: string, tapName: string, strict = false): Graph
     return { nodeId: capture.nodeId, processId, targetSerials };
   });
 
-  return { streams, tapNodeId, videoCaptures };
+  return { streams, tapNodeId, tapPorts: inputsByNode.get(tapNodeId ?? -1) ?? [], videoCaptures };
 };
 
 /** Which tap inputs a stream's output port feeds. Mono fans out to both sides. */
@@ -445,10 +485,11 @@ export class TapCapture {
       );
       if (captureMatches.length !== 1) {
         for (const key of [...this.linked]) {
-          const [from, to] = key.split('->');
+          const [source, to] = key.split('->');
+          const from = source!.slice(source!.indexOf(':') + 1);
           if (!current()) return;
           try {
-            await this.runner('pw-link', ['-d', from!, `${graph.tapNodeId}:${to}`]);
+            await this.runner('pw-link', ['-d', from, to!]);
           } catch (error) {
             if (current()) {
               this.log('could not remove audio without the selected portal video session; stopping capture:', error);
@@ -476,10 +517,11 @@ export class TapCapture {
         // exits and its audio helper is reparented). Drop only our tap links.
         for (const key of [...this.linked]) {
           if (!key.startsWith(`${stream.nodeId}:`)) continue;
-          const [from, to] = key.split('->');
+          const [source, to] = key.split('->');
+          const from = source!.slice(source!.indexOf(':') + 1);
           if (!current()) return;
           try {
-            await this.runner('pw-link', ['-d', from!, `${graph.tapNodeId}:${to}`]);
+            await this.runner('pw-link', ['-d', from, to!]);
           } catch (error) {
             if (current()) {
               this.log('could not remove ineligible audio; stopping capture:', error);
@@ -495,12 +537,14 @@ export class TapCapture {
       alive.add(stream.nodeId);
 
       for (const port of stream.ports) {
-        for (const target of targetsFor(port)) {
+        for (const target of targetsFor(port.name)) {
           if (!current()) return;
-          const key = `${stream.nodeId}:${port}->${target}`;
+          const input = graph.tapPorts.find((candidate) => candidate.name === target);
+          if (!input) continue;
+          const key = `${stream.nodeId}:${port.id}->${input.id}`;
           if (this.linked.has(key)) continue;
           try {
-            await this.runner('pw-link', [`${stream.nodeId}:${port}`, `${graph.tapNodeId}:${target}`]);
+            await this.runner('pw-link', ['-w', String(port.id), String(input.id)]);
             if (!current()) return;
             if (this.target.kind === 'application' && !this.hasCurrentTargetProcess(this.target)) {
               this.log('selected application process identity changed while attaching audio');
@@ -577,6 +621,7 @@ export class TapCapture {
       'application.name=sharkord-desktop',
       '-P',
       'node.description=sharkord-desktop',
+      '--container=raw',
       '--format',
       'f32',
       `--rate=${sampleRate}`,

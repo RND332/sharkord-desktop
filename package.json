@@ -1,6 +1,6 @@
 {
   "name": "sharkord-desktop",
-  "version": "0.6.18",
+  "version": "0.6.19",
   "private": true,
   "description": "Sharkord desktop client whose screen share carries the whole PC's audio except Sharkord itself",
   "author": "Talgat Minigaliev <https://github.com/RND332>",
@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:audio-playback": "bun run build && python3 test/audio-playback-native/run.py && SHARKORD_AUDIO_PROBE_CASE=preferences python3 test/audio-playback-native/run.py",
+    "test:audio-share": "bun run build && python3 test/pulse-share-native/run.py application && python3 test/pulse-share-native/run.py screen",
     "test:native-portal": "bash scripts/test-portal-metadata-native.sh",
     "test:crash-smoke": "bun run build && electron test/renderer-crash-smoke.cjs && electron test/renderer-crash-smoke.cjs --crash-loop && electron test/renderer-crash-smoke.cjs --readiness-crash && electron test/renderer-crash-smoke.cjs --picker-menu && electron test/renderer-crash-smoke.cjs --picker-tray && electron test/renderer-crash-smoke.cjs --picker-error && electron test/renderer-crash-smoke.cjs --startup-picker-crash && electron test/renderer-crash-smoke.cjs --error-picker-crash",
     "test:pcm-memory": "bun run build && electron test/pcm-memory-smoke.cjs --mode=blocked --seconds=18",
