@@ -114,6 +114,7 @@
     "url": "https://github.com/RND332/sharkord-desktop.git"
   },
   "dependencies": {
+    "@sentry/electron": "^8.2.0",
     "electron-updater": "^6.8.9"
   }
 }

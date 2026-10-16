@@ -26,6 +26,7 @@ import { bindPortalCaptureTarget, resolveLinuxAudioTarget } from './linux-audio'
 import { displayCapturerRequest, pickDisplaySource, registerPickerIpc } from './picker';
 import { isServerOrigin, normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
 import { runSelftest } from './selftest';
+import { captureError, initSentry } from './sentry';
 import { TapCapture, type TapTarget } from './tap';
 import { WindowsCapture, helperExists, windowsTargetForSource, type WindowsCaptureTarget } from './windows-capture';
 import { checkForUpdatesNow, installPendingUpdateSilently, setupAutoUpdates } from './updater';
@@ -34,14 +35,21 @@ import { startWindowsVoiceShortcuts } from './windows-voice-shortcuts';
 
 initializeLogging();
 
+const config = loadConfig();
+initSentry(config.sentryDsn);
+
 app.on('child-process-gone', (_event, details) => {
   log('child process gone:', details, {
     executableExists: existsSync(process.execPath),
     resourcesExist: existsSync(process.resourcesPath)
   });
+  captureError(new Error(`child process gone: ${details.type} ${details.reason}`), {
+    area: 'child-process'
+  });
 });
 app.on('render-process-gone', (_event, contents, details) => {
   log('renderer gone:', { webContentsId: contents.id, ...details });
+  captureError(new Error(`renderer gone: ${details.reason}`), { area: 'renderer' });
 });
 app.on('web-contents-created', (_event, contents) => {
   const id = contents.id;
@@ -52,8 +60,6 @@ app.on('web-contents-created', (_event, contents) => {
   contents.on('unresponsive', () => log('renderer unresponsive:', id));
   contents.on('responsive', () => log('renderer responsive:', id));
 });
-
-const config = loadConfig();
 
 let warnedAboutEcho = false;
 
