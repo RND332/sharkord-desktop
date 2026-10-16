@@ -18,7 +18,7 @@ const world = vi.hoisted(() => ({
 vi.mock('../src/main/logger', () => ({ initializeLogging() {}, log: world.log, describeEnvironment() {}, readLogTail() {}, attachRendererConsoleLogging() {} }));
 vi.mock('../src/main/config', () => ({ loadConfig: () => ({ mode: 'capture' }) }));
 vi.mock('../src/main/updater', () => ({ setupAutoUpdates() {}, installPendingUpdateSilently() {}, checkForUpdatesNow() {} }));
-vi.mock('../src/main/server-config', () => ({ readServerUrl: () => 'https://test.invalid', normalizeServerUrl: (s: string) => s, isServerOrigin: () => true, saveServerUrl() {} }));
+vi.mock('../src/main/server-config', () => ({ readServerUrl: () => 'https://test.invalid', readSentryDsn: () => null, saveSentryDsn() {}, normalizeServerUrl: (s: string) => s, isServerOrigin: () => true, saveServerUrl() {} }));
 vi.mock('../src/main/tap', () => ({ TapCapture: class { start = world.start; stop = world.stop; tapNode = 'sharkord_capture'; onData() {} } }));
 vi.mock('../src/main/linux-audio', () => ({
   resolveLinuxAudioTarget: world.resolveTarget,

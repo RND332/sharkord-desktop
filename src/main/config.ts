@@ -41,13 +41,14 @@ const argValue = (argv: string[], name: string): string | null => {
 export const loadConfig = (
   argv: string[] = process.argv.slice(1),
   env: NodeJS.ProcessEnv = process.env,
-  platform: NodeJS.Platform = process.platform
+  platform: NodeJS.Platform = process.platform,
+  storedSentryDsn: string | null = null
 ): Config => ({
   url: argValue(argv, 'url') ?? env.SHARKORD_URL ?? null,
   mode: resolveMode(platform),
   tapName: env.SHARKORD_TAP_NAME ?? 'sharkord_capture',
   debugPcm: env.SHARKORD_DEBUG_PCM ?? null,
-  sentryDsn: env.SHARKORD_SENTRY_DSN ?? null,
+  sentryDsn: env.SHARKORD_SENTRY_DSN ?? storedSentryDsn,
   legacyStatePath: join(env.XDG_RUNTIME_DIR ?? homedir(), 'sharkord-desktop.json'),
   selftest: argv.includes('--selftest'),
   cleanup: argv.includes('--cleanup'),

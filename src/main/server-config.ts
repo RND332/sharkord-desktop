@@ -1,7 +1,19 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-export type StoredServer = { url: string };
+export type StoredServer = { url?: string; sentryDsn?: string | null };
+
+/** Read-modify-write: saving one setting must never wipe the other. */
+const writeStored = (path: string, patch: StoredServer): void => {
+  let current: StoredServer = {};
+  try {
+    current = JSON.parse(readFileSync(path, 'utf8')) as StoredServer;
+  } catch {
+    current = {};
+  }
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify({ ...current, ...patch }, null, 2)}\n`);
+};
 
 /**
  * Accepts what people actually paste: with or without a scheme, trailing slashes, ports,
@@ -50,6 +62,21 @@ export const readServerUrl = (path: string): string | null => {
 };
 
 export const saveServerUrl = (path: string, url: string): void => {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify({ url } satisfies StoredServer, null, 2)}\n`);
+  writeStored(path, { url });
+};
+
+/** Reporting stays off until a DSN is stored here, and the environment can still override it. */
+export const readSentryDsn = (path: string): string | null => {
+  try {
+    const stored = JSON.parse(readFileSync(path, 'utf8')) as StoredServer;
+    return typeof stored.sentryDsn === 'string' && stored.sentryDsn
+      ? stored.sentryDsn
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+export const saveSentryDsn = (path: string, dsn: string | null): void => {
+  writeStored(path, { sentryDsn: dsn });
 };

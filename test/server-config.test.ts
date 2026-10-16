@@ -2,7 +2,14 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { isServerOrigin, normalizeServerUrl, readServerUrl, saveServerUrl } from '../src/main/server-config';
+import {
+  isServerOrigin,
+  normalizeServerUrl,
+  readSentryDsn,
+  readServerUrl,
+  saveServerUrl,
+  saveSentryDsn
+} from '../src/main/server-config';
 
 const tempConfigPath = (): string => join(mkdtempSync(join(tmpdir(), 'sharkord-server-')), 'config.json');
 
@@ -69,5 +76,26 @@ describe('server config file', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'sharkord-server-')), 'nested', 'deeper', 'config.json');
     saveServerUrl(path, 'https://example.com');
     expect(readServerUrl(path)).toBe('https://example.com');
+  });
+
+  it('keeps the saved dsn when the server url changes and vice versa', () => {
+    const path = tempConfigPath();
+    saveSentryDsn(path, 'https://key@errors.example.com/3');
+    saveServerUrl(path, 'https://sharkord.example.com');
+
+    expect(readSentryDsn(path)).toBe('https://key@errors.example.com/3');
+    expect(readServerUrl(path)).toBe('https://sharkord.example.com');
+  });
+
+  it('reports nothing until a dsn is saved, and forgets it when cleared', () => {
+    const path = tempConfigPath();
+
+    expect(readSentryDsn(path)).toBeNull();
+
+    saveSentryDsn(path, 'https://key@errors.example.com/3');
+    expect(readSentryDsn(path)).toBe('https://key@errors.example.com/3');
+
+    saveSentryDsn(path, null);
+    expect(readSentryDsn(path)).toBeNull();
   });
 });

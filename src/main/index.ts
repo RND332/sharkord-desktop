@@ -24,7 +24,14 @@ import { attachRendererConsoleLogging, describeEnvironment, getLogsDirectory, in
 import { removeLegacyRouting } from './legacy';
 import { bindPortalCaptureTarget, resolveLinuxAudioTarget } from './linux-audio';
 import { displayCapturerRequest, pickDisplaySource, registerPickerIpc } from './picker';
-import { isServerOrigin, normalizeServerUrl, readServerUrl, saveServerUrl } from './server-config';
+import {
+  isServerOrigin,
+  normalizeServerUrl,
+  readSentryDsn,
+  readServerUrl,
+  saveSentryDsn,
+  saveServerUrl
+} from './server-config';
 import { runSelftest } from './selftest';
 import { captureError, initSentry } from './sentry';
 import { TapCapture, type TapTarget } from './tap';
@@ -35,8 +42,16 @@ import { startWindowsVoiceShortcuts } from './windows-voice-shortcuts';
 
 initializeLogging();
 
-const config = loadConfig();
+const settingsPath = join(app.getPath('userData'), 'config.json');
+const dsnArgument = process.argv
+  .find((argument) => argument.startsWith('--sentry-dsn='))
+  ?.slice('--sentry-dsn='.length);
+
+if (dsnArgument) saveSentryDsn(settingsPath, dsnArgument);
+
+const config = loadConfig(process.argv.slice(1), process.env, process.platform, readSentryDsn(settingsPath));
 initSentry(config.sentryDsn);
+log(`error reporting: ${config.sentryDsn ? config.sentryDsn.replace(/\/\/[^@]+@/, '//***@') : 'off'}`);
 
 app.on('child-process-gone', (_event, details) => {
   log('child process gone:', details, {
@@ -646,7 +661,7 @@ const bootstrap = async (): Promise<void> => {
   }, log);
 
   const connectPagePath = join(__dirname, 'connect.html');
-  const serverConfigPath = join(app.getPath('userData'), 'config.json');
+  const serverConfigPath = settingsPath;
 
   const loadPicker = async (error?: string): Promise<void> => {
     const target = mainWindow;
