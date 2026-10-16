@@ -65,7 +65,9 @@ const PW_DUMP = JSON.stringify([
   { id: 400, type: 'PipeWire:Interface:Port', info: { direction: 'output', props: { 'node.id': 221, 'port.direction': 'out', 'port.name': 'output_FL' } } },
   { id: 401, type: 'PipeWire:Interface:Port', info: { props: { 'node.id': 221, 'port.direction': 'output', 'port.name': 'output_FR' } } },
   { id: 402, type: 'PipeWire:Interface:Port', info: { props: { 'node.id': 222, 'port.direction': 'out', 'port.name': 'output_MONO' } } },
-  { id: 403, type: 'PipeWire:Interface:Port', info: { props: { 'node.id': 221, 'port.direction': 'in', 'port.name': 'input_FL' } } }
+  { id: 403, type: 'PipeWire:Interface:Port', info: { props: { 'node.id': 221, 'port.direction': 'in', 'port.name': 'input_FL' } } },
+  { id: 410, type: 'PipeWire:Interface:Port', info: { props: { 'node.id': 141, 'port.direction': 'in', 'port.name': 'input_FL' } } },
+  { id: 411, type: 'PipeWire:Interface:Port', info: { props: { 'node.id': 141, 'port.direction': 'in', 'port.name': 'input_FR' } } }
 ]);
 
 const withPortalCapture = (processId = 2369069): string => JSON.stringify([
@@ -99,7 +101,8 @@ const makeWorld = (
   const runner: Runner = async (bin, args) => {
     if (bin === 'pw-dump') return dump;
     if (bin === 'pw-link') {
-      links.push({ from: args[0]!, to: args[1]! });
+      const ports = args[0] === '-w' ? args.slice(1) : args;
+      links.push({ from: ports[0]!, to: ports[1]! });
       return '';
     }
     throw new Error(`unexpected ${bin} ${args.join(' ')}`);
@@ -129,6 +132,68 @@ const makeWorld = (
 };
 
 describe('parseGraph', () => {
+  it.each([
+    { verified: true, api: 'pipewire-pulse' },
+    { verified: false, api: 'pipewire-pulse' },
+    { verified: true, api: 'native' },
+    { verified: true, api: undefined }
+  ])('rejects a PulseAudio broker PID when the application PID is missing %j', ({ verified, api }) => {
+    const objects = JSON.parse(PW_DUMP);
+    Object.assign(objects[0].info.props, {
+      'pipewire.sec.pid': 1349,
+      'client.api': api,
+      'pulse.server.type': 'unix',
+      'pipewire.sec.uid': process.getuid?.()
+    });
+    delete objects[0].info.props['application.process.id'];
+    const graph = parseGraph(JSON.stringify(objects), 'sharkord_capture', false, () => verified);
+    expect(graph.streams[0]!.processId).toBeNull();
+  });
+
+  it('uses the native protocol PID when the application PID is missing', () => {
+    const objects = JSON.parse(PW_DUMP);
+    delete objects[0].info.props['application.process.id'];
+    const graph = parseGraph(JSON.stringify(objects), 'sharkord_capture');
+    expect(graph.streams[0]!.processId).toBe(27893);
+  });
+
+  it('resolves a local PulseAudio application through a verified broker', () => {
+    const objects = JSON.parse(PW_DUMP);
+    Object.assign(objects[0].info.props, {
+      'pipewire.sec.pid': 1349,
+      'client.api': 'pipewire-pulse',
+      'pulse.server.type': 'unix',
+      'pipewire.sec.uid': process.getuid?.()
+    });
+    const graph = parseGraph(JSON.stringify(objects), 'sharkord_capture', false, (pid) => pid === 1349);
+    expect(graph.streams[0]!.processId).toBe(27893);
+  });
+
+  it.each([
+    { 'client.api': 'native' },
+    { 'pulse.server.type': 'tcp' },
+    { 'pipewire.sec.uid': (process.getuid?.() ?? 1000) + 1 },
+    { 'application.process.id': 'invalid' }
+  ])('does not accept unverifiable PulseAudio metadata %j', (invalid) => {
+    const objects = JSON.parse(PW_DUMP);
+    Object.assign(objects[0].info.props, {
+      'pipewire.sec.pid': 1349, 'client.api': 'pipewire-pulse',
+      'pulse.server.type': 'unix', 'pipewire.sec.uid': process.getuid?.(), ...invalid
+    });
+    const graph = parseGraph(JSON.stringify(objects), 'sharkord_capture', false, () => true);
+    expect(graph.streams[0]!.processId).toBeNull();
+  });
+
+  it('rejects a PulseAudio label from an unrecognized executable', () => {
+    const objects = JSON.parse(PW_DUMP);
+    Object.assign(objects[0].info.props, {
+      'pipewire.sec.pid': 1349, 'client.api': 'pipewire-pulse',
+      'pulse.server.type': 'unix', 'pipewire.sec.uid': process.getuid?.()
+    });
+    const graph = parseGraph(JSON.stringify(objects), 'sharkord_capture', false, () => false);
+    expect(graph.streams[0]!.processId).toBeNull();
+  });
+
   it('uses the server-authenticated client PID rather than a forged audio node PID', () => {
     const graph = parseGraph(JSON.stringify([
       { id: 901, type: 'PipeWire:Interface:Client', info: { props: {
@@ -174,8 +239,8 @@ describe('parseGraph', () => {
     const graph = parseGraph(PW_DUMP, 'sharkord_capture');
 
     expect(graph.streams).toEqual([
-      { nodeId: 221, appName: 'Google Chrome', processId: 27893, ports: ['output_FL', 'output_FR'] },
-      { nodeId: 222, appName: 'Google Chrome', processId: 27893, ports: ['output_MONO'] }
+      { nodeId: 221, appName: 'Google Chrome', processId: 27893, ports: [{ id: 400, name: 'output_FL' }, { id: 401, name: 'output_FR' }] },
+      { nodeId: 222, appName: 'Google Chrome', processId: 27893, ports: [{ id: 402, name: 'output_MONO' }] }
     ]);
     expect(graph.tapNodeId).toBe(141);
   });
@@ -219,8 +284,8 @@ describe('parseGraph', () => {
   });
 
   it('survives output that is not the expected JSON', () => {
-    expect(parseGraph('not json', 'sharkord_capture')).toEqual({ streams: [], tapNodeId: null, videoCaptures: [] });
-    expect(parseGraph('{"id":1}', 'sharkord_capture')).toEqual({ streams: [], tapNodeId: null, videoCaptures: [] });
+    expect(parseGraph('not json', 'sharkord_capture')).toEqual({ streams: [], tapNodeId: null, tapPorts: [], videoCaptures: [] });
+    expect(parseGraph('{"id":1}', 'sharkord_capture')).toEqual({ streams: [], tapNodeId: null, tapPorts: [], videoCaptures: [] });
   });
 });
 
@@ -264,6 +329,7 @@ describe('TapCapture', () => {
       'application.name=sharkord-desktop',
       '-P',
       'node.description=sharkord-desktop',
+      '--container=raw',
       '--format',
       'f32',
       '--rate=48000',
@@ -300,16 +366,27 @@ describe('TapCapture', () => {
     }
   });
 
+  it('links numeric PipeWire port IDs, not unsupported node-id:port-name pairs', async () => {
+    const { links, tap } = makeWorld();
+    try {
+      tap.start();
+      await tap.reconcile();
+      expect(links[0]).toEqual({ from: '400', to: '410' });
+    } finally {
+      tap.stop();
+    }
+  });
+
   it("links every other application's playback into the tap by node id, mono fanned out", async () => {
     const { links, tap } = makeWorld();
     tap.start();
     await tap.reconcile();
 
     expect(links).toEqual([
-      { from: '221:output_FL', to: '141:input_FL' },
-      { from: '221:output_FR', to: '141:input_FR' },
-      { from: '222:output_MONO', to: '141:input_FL' },
-      { from: '222:output_MONO', to: '141:input_FR' }
+      { from: '400', to: '410' },
+      { from: '401', to: '411' },
+      { from: '402', to: '410' },
+      { from: '402', to: '411' }
     ]);
     expect(tap.linkedCount).toBe(4);
     tap.stop();
@@ -323,7 +400,7 @@ describe('TapCapture', () => {
     const { links, tap } = makeWorld([], JSON.stringify(objects));
     tap.start({ kind: 'application', processId: 27893, processStartTime: 'fixture-start' });
     await tap.reconcile();
-    expect(links.map((link) => link.from)).toEqual(['221:output_FL', '221:output_FR']);
+    expect(links.map((link) => link.from)).toEqual(['400', '401']);
     tap.stop();
   });
 
@@ -354,7 +431,7 @@ describe('TapCapture', () => {
     setDump(withPortalCapture());
     await tap.reconcile();
     expect(links.map((link) => link.from)).toEqual([
-      '221:output_FL', '221:output_FR', '222:output_MONO', '222:output_MONO'
+      '400', '401', '402', '402'
     ]);
 
     setDump(PW_DUMP);
@@ -467,7 +544,7 @@ describe('TapCapture', () => {
     expect(tap.start(screenTarget)).toBe(true);
     await tap.reconcile();
     expect(links.map((link) => link.from)).toEqual([
-      '221:output_FL', '221:output_FR', '222:output_MONO', '222:output_MONO'
+      '400', '401', '402', '402'
     ]);
 
     setDump(JSON.stringify(objects.filter((entry: { id: number }) => entry.id !== 502 && entry.id !== 710)));
@@ -500,7 +577,7 @@ describe('TapCapture', () => {
     const { links, tap } = makeWorld([], JSON.stringify(objects), readProcessStat);
     tap.start({ kind: 'application', processId: process.ppid, processStartTime: targetIdentity!.startTime });
     await tap.reconcile();
-    expect(links.map((link) => link.from)).toEqual(['221:output_FL', '221:output_FR']);
+    expect(links.map((link) => link.from)).toEqual(['400', '401']);
     tap.stop();
   });
 
@@ -536,14 +613,15 @@ describe('TapCapture', () => {
   });
 
   it('does not let a stopped share poison the next capture with stale links or errors', async () => {
-    const newDump = PW_DUMP.replace('"id":141,', '"id":241,');
+    const newDump = PW_DUMP.replace('"id":141,', '"id":241,').replaceAll('"node.id":141', '"node.id":241');
     const links: Link[] = [];
     const logs: string[] = [];
     let dumpCalls = 0;
     let rejectFirst!: (error: Error) => void;
     const runner: Runner = async (bin, args) => {
       if (bin === 'pw-link') {
-        links.push({ from: args[0]!, to: args[1]! });
+        const ports = args[0] === '-w' ? args.slice(1) : args;
+        links.push({ from: ports[0]!, to: ports[1]! });
         return '';
       }
       dumpCalls += 1;
@@ -578,10 +656,10 @@ describe('TapCapture', () => {
 
     expect(dumpCalls).toBe(2);
     expect(links).toEqual([
-      { from: '221:output_FL', to: '241:input_FL' },
-      { from: '221:output_FR', to: '241:input_FR' },
-      { from: '222:output_MONO', to: '241:input_FL' },
-      { from: '222:output_MONO', to: '241:input_FR' }
+      { from: '400', to: '410' },
+      { from: '401', to: '411' },
+      { from: '402', to: '410' },
+      { from: '402', to: '411' }
     ]);
     expect(logs.some((line) => line.includes('could not inspect'))).toBe(false);
     tap.stop();
