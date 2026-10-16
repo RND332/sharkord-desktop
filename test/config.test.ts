@@ -39,6 +39,20 @@ describe('loadConfig', () => {
     ).toBe('https://key@errors.example.com/3');
   });
 
+  it('prefers the environment over the dsn saved on disk', () => {
+    expect(loadConfig([], {}, 'linux', 'https://saved@errors.example.com/3').sentryDsn).toBe(
+      'https://saved@errors.example.com/3'
+    );
+    expect(
+      loadConfig(
+        [],
+        { SHARKORD_SENTRY_DSN: 'https://env@errors.example.com/3' },
+        'linux',
+        'https://saved@errors.example.com/3'
+      ).sentryDsn
+    ).toBe('https://env@errors.example.com/3');
+  });
+
   it('recognises the maintenance flags', () => {
     expect(loadConfig(['--selftest'], {}).selftest).toBe(true);
     expect(loadConfig(['--cleanup'], {}).cleanup).toBe(true);
