@@ -15,7 +15,7 @@ const world = vi.hoisted(() => ({
   showMessageBox: vi.fn(async () => ({ response: 0 })), log: vi.fn(), steps: [] as string[],
   getSources: vi.fn(async () => { world.steps.push('get-sources'); return [{ id: 'screen:1:0', name: 'Screen 1' }]; })
 }));
-vi.mock('../src/main/logger', () => ({ initializeLogging() {}, log: world.log, describeEnvironment() {}, readLogTail() {} }));
+vi.mock('../src/main/logger', () => ({ initializeLogging() {}, log: world.log, describeEnvironment() {}, readLogTail() {}, attachRendererConsoleLogging() {} }));
 vi.mock('../src/main/config', () => ({ loadConfig: () => ({ mode: 'capture' }) }));
 vi.mock('../src/main/updater', () => ({ setupAutoUpdates() {}, installPendingUpdateSilently() {}, checkForUpdatesNow() {} }));
 vi.mock('../src/main/server-config', () => ({ readServerUrl: () => 'https://test.invalid', normalizeServerUrl: (s: string) => s, isServerOrigin: () => true, saveServerUrl() {} }));

@@ -37,6 +37,11 @@ describe('loadConfig', () => {
     expect(loadConfig([], {}).selftest).toBe(false);
   });
 
+  it('records the whole client console only when verbose logs are asked for', () => {
+    expect(loadConfig(['--verbose-logs'], {}).verboseLogs).toBe(true);
+    expect(loadConfig([], {}).verboseLogs).toBe(false);
+  });
+
   it('leaves capture to the platform off Linux', () => {
     expect(loadConfig([], {}, 'darwin').mode).toBe('passthrough');
     expect(loadConfig([], {}, 'win32').mode).toBe('passthrough');

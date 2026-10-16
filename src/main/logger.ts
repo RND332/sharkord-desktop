@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { platform } from 'node:os';
 import { release as osRelease } from 'node:os';
 import { inspect } from 'node:util';
-import { app } from 'electron';
+import { app, type WebContents } from 'electron';
 
 /**
  * Chromium flags needed for platform capture. Called before `app.ready` so the GPU process and
@@ -29,10 +29,11 @@ const applyPerformanceFlags = (): void => {
 const MAX_BYTES = 512 * 1024;
 const KEEP_BYTES = 256 * 1024;
 const NATIVE_MAX_BYTES = 2 * 1024 * 1024;
+const CLIENT_MAX_BYTES = 2 * 1024 * 1024;
+const CLIENT_KEEP_BYTES = 1 * 1024 * 1024;
 const SESSION_COUNT = 5;
 let directory: string | null = null;
 let initialized = false;
-let writtenBytes = 0;
 
 /** Independent of --user-data-dir: deleting a temporary profile must not delete the evidence. */
 export const getLogsDirectory = (): string => join(app.getPath('appData'), 'sharkord-desktop', 'logs');
@@ -48,6 +49,7 @@ const sessionDirectory = (): string => {
 };
 const logPath = (): string => join(sessionDirectory(), 'main.log');
 const nativeLogPath = (): string => join(sessionDirectory(), 'chromium.log');
+const clientLogPath = (): string => join(sessionDirectory(), 'renderer.log');
 
 /** Read only the bounded tail; discard a partial first line rather than split UTF-8. */
 const tail = (path: string, bytes: number): Buffer => {
@@ -95,23 +97,43 @@ const pruneSessions = (): void => {
   }
 };
 
+/** One line, one append, bounded by actual size so a second writer cannot slip past the cap. */
+const appendBounded = (path: string, line: string, maxBytes: number, keepBytes: number): void => {
+  appendFileSync(path, line, { mode: 0o600 });
+  if (statSync(path).size > maxBytes) trim(path, maxBytes, keepBytes);
+};
+
+const stamp = (): string => `[${new Date().toISOString()} pid=${process.pid}] `;
+
 /** Preserve Error stacks/causes and tolerate circular objects, bigint and failed writes. */
 export const log = (...parts: unknown[]): void => {
   try {
     const message = parts.map((part) => typeof part === 'string' ? part : inspect(part, {
       depth: 5, getters: false, customInspect: false, maxArrayLength: 50, maxStringLength: 8192, colors: false
     })).join(' ');
-    const line = `[${new Date().toISOString()} pid=${process.pid}] ${message.slice(0, 32768)}\n`;
+    const line = `${stamp()}${message.slice(0, 32768)}\n`;
     try { console.log('[sharkord-desktop]', line.trimEnd()); } catch { /* Closed stdout must not lose the file log. */ }
-    appendFileSync(logPath(), line, { mode: 0o600 });
-    writtenBytes += Buffer.byteLength(line);
-    if (writtenBytes > MAX_BYTES) {
-      trim(logPath(), MAX_BYTES, KEEP_BYTES);
-      writtenBytes = statSync(logPath()).size;
-    }
+    appendBounded(logPath(), line, MAX_BYTES, KEEP_BYTES);
   } catch {
     // Logging must never turn a recoverable failure into a crash.
   }
+};
+
+/**
+ * The client's own console output only lives in its window, so a voice or demo failure disappears
+ * with the renderer. Keep it in its own file: client chatter must not push crash evidence out of
+ * `main.log`. Errors and warnings survive a normal run; the rest needs `--verbose-logs`.
+ */
+export const attachRendererConsoleLogging = (contents: WebContents, verbose = false): void => {
+  contents.on('console-message', (details) => {
+    if (!verbose && details.level !== 'error' && details.level !== 'warning') return;
+    try {
+      const line = `${stamp()}${details.level} ${details.message.slice(0, 8192)} (${details.sourceId}:${details.lineNumber})\n`;
+      appendBounded(clientLogPath(), line, CLIENT_MAX_BYTES, CLIENT_KEEP_BYTES);
+    } catch {
+      // A failed client log must not take the window down with it.
+    }
+  });
 };
 
 /** Call before app.ready so Chromium subprocesses inherit native file logging. */
@@ -152,15 +174,21 @@ export const describeEnvironment = (): string => [
   `session:   ${process.env.XDG_SESSION_TYPE ?? 'n/a'}`,
   `os:        ${osRelease()}`,
   `log:       ${logPath()}`,
+  `client:    ${clientLogPath()}`,
   `chromium:  ${nativeLogPath()}`
 ].join('\n');
 
 export const readLogTail = (maxLines = 300): string => {
   if (maxLines <= 0) return '';
-  const read = (path: string): string => {
-    try { return tail(path, KEEP_BYTES).toString('utf8').split('\n').filter(Boolean).slice(-maxLines).join('\n'); }
+  const read = (path: string, bytes = KEEP_BYTES): string => {
+    try { return tail(path, bytes).toString('utf8').split('\n').filter(Boolean).slice(-maxLines).join('\n'); }
     catch { return '(no log yet)'; }
   };
-  try { return `Application:\n${read(logPath())}\n\nChromium (may contain private paths/URLs):\n${read(nativeLogPath())}`; }
-  catch { return '(logs unavailable)'; }
+  try {
+    return [
+      `Application:\n${read(logPath())}`,
+      `Client console:\n${read(clientLogPath(), CLIENT_KEEP_BYTES)}`,
+      `Chromium (may contain private paths/URLs):\n${read(nativeLogPath())}`
+    ].join('\n\n');
+  } catch { return '(logs unavailable)'; }
 };
