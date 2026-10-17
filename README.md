@@ -131,6 +131,8 @@ bun run test           # unit tests
 bun run selftest       # Linux: real display-media patch, PCM injection and tone-exclusion check
 bun run dist:linux     # packaged builds (dist:win, dist:mac on those hosts)
 bun run build && electron . --cleanup   # remove the virtual sink an older version left behind
+bun run build && electron . --verbose-logs   # record the client's whole console, not just errors
+bun run build && electron . --sentry-dsn=https://<key>@errors.example.com/3   # store where main process crashes are reported
 ```
 
 On Windows, install the Visual Studio C++ build tools and Windows SDK:
@@ -341,7 +343,8 @@ has not been runtime-verified. Release packaging checks are not that proof.
 | `src/main/windows-capture.ts` | runs `win-audio-capture.exe` and streams its PCM |
 | `native/windows/win-audio-capture.cpp` | source-scoped WASAPI process loopback, include/exclude modes |
 | `src/main/legacy.ts` | cleans up the virtual sink older versions created |
-| `src/main/logger.ts` | console + `main.log` for bug reports |
+| `src/main/logger.ts` | console + `main.log` + `renderer.log` for bug reports |
+| `src/main/sentry.ts` | reports main process crashes when a DSN is configured |
 | `src/main/updater.ts` | automatic updates from the release page |
 | `src/main/picker.ts` | screen/window picker for platforms without one |
 | `src/main/selftest.ts` | tone-exclusion proof |
